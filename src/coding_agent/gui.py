@@ -49,6 +49,7 @@ MONO_FONT = "Cascadia Mono"
 APP_NAME = "小码"
 ASSISTANT_LABEL = APP_NAME
 COMPOSER_LINES = 3
+COMPOSER_SHORTCUT_HINT = "Enter 发送 · Shift+Enter 换行"
 EMPTY_STATE = (
     "今天想让小码做点什么？",
     "说清目标，剩下的交给我慢慢理顺。",
@@ -483,6 +484,7 @@ class CodingAgentApp:
             show="tree",
             selectmode="browse",
         )
+        self.task_tree.tag_configure("section", foreground=SIDEBAR_MUTED, font=(UI_FONT, 9, "bold"))
         self.task_tree.tag_configure("project", foreground=SIDEBAR_MUTED, font=(UI_FONT, 9, "bold"))
         self.task_tree.tag_configure("task", foreground=SIDEBAR_TEXT, font=(UI_FONT, 10))
         self.task_tree.tag_configure("running", foreground="#F5B493", font=(UI_FONT, 10, "bold"))
@@ -648,7 +650,7 @@ class CodingAgentApp:
         )
         shortcut_label = tk.Label(
             composer_actions,
-            text="Ctrl + Enter 开始",
+            text=COMPOSER_SHORTCUT_HINT,
             bg=SURFACE,
             fg=MUTED,
             font=(UI_FONT, 9),
@@ -741,7 +743,10 @@ class CodingAgentApp:
         selected = filedialog.askdirectory(parent=self.root, initialdir=str(initial), title="选择工作目录")
         if not selected:
             return
-        self._bind_task_to_path(session, Path(selected))
+        try:
+            self._bind_task_to_path(session, Path(selected))
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("工作目录无效", f"无法使用所选工作目录：{exc}", parent=self.root)
 
     def _add_project(self, path: Path) -> ProjectSession:
         project = self._ensure_project(path)
@@ -1076,8 +1081,21 @@ class CodingAgentApp:
         project = self._current_project()
         if project is None:
             return
-        self._show_item_menu(
-            f"project:{project.id}",
+        project_id = project.id
+        menu = tk.Menu(
+            self.root,
+            tearoff=False,
+            bg=SURFACE,
+            fg=TEXT,
+            activebackground=BLUSH,
+            activeforeground=TEXT,
+            relief="flat",
+            bd=0,
+            font=(UI_FONT, 10),
+        )
+        menu.add_command(label="重命名", command=lambda target_id=project_id: self._prompt_rename_tree_item(f"project:{target_id}"))
+        self._post_transient_menu(
+            menu,
             self.project_menu_button.winfo_rootx(),
             self.project_menu_button.winfo_rooty() + self.project_menu_button.winfo_height(),
         )
@@ -1149,17 +1167,21 @@ class CodingAgentApp:
         if hasattr(self, "tree_actions"):
             self._hide_tree_actions()
         self.task_tree.delete(*self.task_tree.get_children())
+        conversations_item = "section:conversations"
+        projects_item = "section:projects"
+        self.task_tree.insert("", "end", iid=conversations_item, text="对话", open=True, tags=("section",))
+        for task in (candidate for candidate in self.tasks if candidate.project_id is None):
+            marker = "●  " if task.running else "·  "
+            tags = ("running",) if task.running else ("task",)
+            self.task_tree.insert(conversations_item, "end", iid=f"task:{task.id}", text=marker + task.title, tags=tags)
+        self.task_tree.insert("", "end", iid=projects_item, text="项目", open=True, tags=("section",))
         for project in self.projects:
             project_item = f"project:{project.id}"
-            self.task_tree.insert("", "end", iid=project_item, text=project.title.upper(), open=True, tags=("project",))
+            self.task_tree.insert(projects_item, "end", iid=project_item, text=project.title.upper(), open=True, tags=("project",))
             for task in (candidate for candidate in self.tasks if candidate.project_id == project.id):
                 marker = "●  " if task.running else "·  "
                 tags = ("running",) if task.running else ("task",)
                 self.task_tree.insert(project_item, "end", iid=f"task:{task.id}", text=marker + task.title, tags=tags)
-        for task in (candidate for candidate in self.tasks if candidate.project_id is None):
-            marker = "●  " if task.running else "·  "
-            tags = ("running",) if task.running else ("task",)
-            self.task_tree.insert("", "end", iid=f"task:{task.id}", text=marker + task.title, tags=tags)
         if self.current_id and self.task_tree.exists(f"task:{self.current_id}"):
             self.task_tree.selection_set(f"task:{self.current_id}")
             self.task_tree.see(f"task:{self.current_id}")
@@ -1256,8 +1278,11 @@ class CodingAgentApp:
         for raw_project in state.get("projects", []):
             if not isinstance(raw_project, dict):
                 continue
+            raw_path = raw_project.get("path")
+            if not isinstance(raw_path, str) or not raw_path.strip():
+                continue
             try:
-                path = Path(str(raw_project["path"])).expanduser().resolve()
+                path = Path(raw_path).expanduser().resolve()
             except (KeyError, OSError):
                 continue
             if not path.is_dir():

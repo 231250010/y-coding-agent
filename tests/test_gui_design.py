@@ -78,3 +78,7 @@ def test_composer_actions_reserve_right_controls_before_workspace_path() -> None
         ("menu", {"side": "left", "padx": (0, 6)}),
         ("workspace", {"side": "left", "fill": "x", "expand": True}),
     ]
+
+
+def test_composer_hint_foregrounds_enter_and_shift_enter() -> None:
+    assert gui.COMPOSER_SHORTCUT_HINT == "Enter 发送 · Shift+Enter 换行"

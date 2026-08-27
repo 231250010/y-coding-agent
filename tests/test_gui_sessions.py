@@ -176,13 +176,31 @@ def test_new_task_is_projectless_even_when_a_project_is_selected() -> None:
     assert app.tasks[-1].agent.workspace is None
 
 
-def test_projectless_task_is_visible_in_the_sidebar() -> None:
+def test_sidebar_groups_projectless_conversations_before_projects() -> None:
     app, task = make_app_with_projectless_task()
+    project = ProjectSession("p1", Path("project"), "Project")
+    project_task = TaskSession(
+        id="task-2",
+        project_id=project.id,
+        title="Project task",
+        agent=FakeAgent(project.path),
+        cancel_event=threading.Event(),
+    )
+    app.projects.append(project)
+    app.tasks.append(project_task)
     app.task_tree = RecordingTree()
 
     CodingAgentApp._refresh_task_tree(app)
 
-    assert app.task_tree.items[f"task:{task.id}"][0] == ""
+    root_rows = [
+        (item_id, options["text"])
+        for item_id, (parent, options) in app.task_tree.items.items()
+        if parent == ""
+    ]
+    assert root_rows == [("section:conversations", "对话"), ("section:projects", "项目")]
+    assert app.task_tree.items[f"task:{task.id}"][0] == "section:conversations"
+    assert app.task_tree.items[f"project:{project.id}"][0] == "section:projects"
+    assert app.task_tree.items[f"task:{project_task.id}"][0] == f"project:{project.id}"
 
 
 def test_binding_task_preserves_non_system_history(tmp_path: Path) -> None:
@@ -236,6 +254,25 @@ def test_loads_missing_project_task_as_projectless_and_restores_current(tmp_path
     assert task.agent.workspace is None
     assert task.title_is_custom is True
     assert app.current_id == task.id
+
+
+@pytest.mark.parametrize("raw_path", ("", "   \t"))
+def test_load_skips_blank_project_paths_and_keeps_referenced_tasks_projectless(raw_path: str) -> None:
+    app = make_logic_only_app()
+    app.store = SimpleNamespace(
+        load=lambda: {
+            "version": 2,
+            "current_id": "task-1",
+            "projects": [{"id": "invalid", "title": "Invalid", "path": raw_path}],
+            "tasks": [{"id": "task-1", "project_id": "invalid", "title": "Chat", "entries": [], "history": []}],
+        }
+    )
+
+    app._load_sessions()
+
+    assert app.projects == []
+    assert app.tasks[0].project_id is None
+    assert app.tasks[0].agent.workspace is None
 
 
 def test_saves_version_two_projects_and_tasks_separately(tmp_path: Path) -> None:
@@ -338,6 +375,22 @@ def test_choose_workspace_keeps_current_task_when_picker_is_cancelled(monkeypatc
 
     assert task.project_id is None
     assert task.agent.workspace is None
+
+
+def test_choose_workspace_reports_binding_error_without_changing_task(monkeypatch, tmp_path: Path) -> None:
+    app, task = make_app_with_projectless_task()
+    app.root = object()
+    app.config = SimpleNamespace(workspace=tmp_path)
+    monkeypatch.setattr(gui.filedialog, "askdirectory", lambda **_options: str(tmp_path))
+    monkeypatch.setattr(app, "_bind_task_to_path", lambda *_args: (_ for _ in ()).throw(ValueError("不存在")))
+    errors: list[tuple[str, str]] = []
+    monkeypatch.setattr(gui.messagebox, "showerror", lambda title, message, **_kwargs: errors.append((title, message)))
+
+    app.choose_workspace_for_current()
+
+    assert task.project_id is None
+    assert task.agent.workspace is None
+    assert errors == [("工作目录无效", "无法使用所选工作目录：不存在")]
 
 
 def test_composer_menu_uses_projectless_workspace_label(monkeypatch) -> None:
@@ -486,3 +539,42 @@ def test_item_menu_remains_active_until_the_composer_menu_replaces_it(monkeypatc
     assert created[0].destroyed is True
     assert created[1].destroyed is False
     assert app._active_menu is created[1]
+
+
+def test_header_project_menu_is_rename_only_and_captures_its_project_target(monkeypatch) -> None:
+    app, first, second, _first_task, _second_task = make_app_with_two_projects()
+    app.root = object()
+    app.project_menu_button = SimpleNamespace(
+        winfo_rootx=lambda: 20,
+        winfo_rooty=lambda: 30,
+        winfo_height=lambda: 10,
+    )
+    created: list[object] = []
+    renamed: list[str] = []
+
+    class RecordingMenu:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.commands: list[dict[str, object]] = []
+            created.append(self)
+
+        def add_command(self, **options: object) -> None:
+            self.commands.append(options)
+
+        def tk_popup(self, *_args) -> None:
+            pass
+
+        def grab_release(self) -> None:
+            pass
+
+        def destroy(self) -> None:
+            pass
+
+    monkeypatch.setattr(gui.tk, "Menu", RecordingMenu)
+    app._prompt_rename_tree_item = renamed.append
+
+    app._show_current_project_menu()
+    app.current_id = second.id
+    created[0].commands[0]["command"]()
+
+    assert [command["label"] for command in created[0].commands] == ["重命名"]
+    assert renamed == [f"project:{first.id}"]
