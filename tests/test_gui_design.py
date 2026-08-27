@@ -21,6 +21,17 @@ def test_core_text_palette_keeps_readable_contrast() -> None:
     assert _contrast_ratio(gui.TOOL_STATUS, gui.CANVAS) >= 4.5
 
 
+def test_approved_workspace_palette_is_applied() -> None:
+    assert gui.SIDEBAR == "#244A67"
+    assert gui.CANVAS == "#F7F5F0"
+    assert gui.SURFACE == "#FFFFFF"
+    assert gui.SIGNATURE == "#F2A97E"
+    assert gui.DIFF_ADDED_BG == "#DDF4E5"
+    assert gui.DIFF_ADDED_FG == "#177245"
+    assert gui.DIFF_REMOVED_BG == "#FCE1E1"
+    assert gui.DIFF_REMOVED_FG == "#B33A3A"
+
+
 def test_empty_state_copy_has_a_friendly_coding_assistant_voice() -> None:
     assert gui.APP_NAME == "小码"
     assert gui.ASSISTANT_LABEL == gui.APP_NAME
