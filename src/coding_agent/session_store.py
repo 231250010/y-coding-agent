@@ -7,7 +7,28 @@ from typing import Any
 
 
 def empty_session_state() -> dict[str, Any]:
-    return {"version": 2, "current_id": None, "projects": [], "tasks": []}
+    return {"version": 3, "current_id": None, "projects": [], "tasks": []}
+
+
+def _normalize_task(task: dict[str, Any], project_id: str | None = None) -> dict[str, Any]:
+    task_copy = deepcopy(task)
+    raw_changes = task_copy.get("file_changes", [])
+    if isinstance(raw_changes, list):
+        validated_changes = [
+            deepcopy(item)
+            for item in raw_changes
+            if isinstance(item, dict)
+            and isinstance(item.get("path"), str)
+            and isinstance(item.get("segments", []), list)
+        ]
+    else:
+        validated_changes = []
+    raw_review_path = task_copy.get("review_path")
+    task_copy["project_id"] = project_id if project_id is not None else task_copy.get("project_id")
+    task_copy["title_is_custom"] = bool(task_copy.get("title_is_custom", False))
+    task_copy["file_changes"] = validated_changes
+    task_copy["review_path"] = raw_review_path if isinstance(raw_review_path, str) else None
+    return task_copy
 
 
 def normalize_session_state(value: Any) -> dict[str, Any]:
@@ -35,32 +56,25 @@ def normalize_session_state(value: Any) -> dict[str, Any]:
             for task in nested_tasks:
                 if not isinstance(task, dict):
                     continue
-                task_copy = deepcopy(task)
-                task_copy["project_id"] = project.get("id")
-                task_copy["title_is_custom"] = False
-                normalized_tasks.append(task_copy)
+                project_id = project.get("id")
+                normalized_tasks.append(
+                    _normalize_task(task, project_id if isinstance(project_id, str) else None)
+                )
         return {
-            "version": 2,
+            "version": 3,
             "current_id": None,
             "projects": normalized_projects,
             "tasks": normalized_tasks,
         }
 
-    if version == 2:
+    if version in {2, 3}:
         tasks = value.get("tasks")
         if not isinstance(tasks, list):
             return empty_session_state()
-        normalized_tasks = []
-        for task in tasks:
-            if not isinstance(task, dict):
-                continue
-            task_copy = deepcopy(task)
-            task_copy["project_id"] = task_copy.get("project_id")
-            task_copy["title_is_custom"] = bool(task_copy.get("title_is_custom", False))
-            normalized_tasks.append(task_copy)
+        normalized_tasks = [_normalize_task(task) for task in tasks if isinstance(task, dict)]
         current_id = value.get("current_id")
         return {
-            "version": 2,
+            "version": 3,
             "current_id": current_id if isinstance(current_id, str) else None,
             "projects": [deepcopy(project) for project in projects if isinstance(project, dict)],
             "tasks": normalized_tasks,

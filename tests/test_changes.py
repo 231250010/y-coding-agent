@@ -157,3 +157,44 @@ def test_workspace_capture_reports_total_snapshot_limit(tmp_path: Path) -> None:
     capture = tracker.capture_workspace()
     assert capture.warning is not None
     assert "预览不完整" in capture.warning
+
+
+def test_external_drift_closes_old_segment_and_starts_new_one(tmp_path: Path) -> None:
+    path = tmp_path / "a.txt"
+    path.write_text("base\n", encoding="utf-8")
+    tracker = ConversationChangeTracker(tmp_path)
+    capture = tracker.capture_paths(["a.txt"])
+    path.write_text("agent one\n", encoding="utf-8")
+    tracker.finish(capture)
+    serialized = tracker.serialize()
+
+    path.write_text("user edit\n", encoding="utf-8")
+    restored = ConversationChangeTracker(tmp_path)
+    restored.load_serialized(serialized)
+    next_capture = restored.capture_paths(["a.txt"])
+    path.write_text("agent two\n", encoding="utf-8")
+    restored.finish(next_capture)
+
+    change = restored.changes["a.txt"]
+    assert len(change.segments) == 2
+    assert change.segments[0].drifted is True
+    assert change.segments[1].baseline.text == "user edit\n"
+
+
+def test_retargeting_workspace_starts_a_labeled_segment(tmp_path: Path) -> None:
+    first_workspace = tmp_path / "first"
+    second_workspace = tmp_path / "second"
+    first_workspace.mkdir()
+    second_workspace.mkdir()
+    tracker = ConversationChangeTracker(first_workspace)
+    first = tracker.capture_paths(["same.txt"])
+    (first_workspace / "same.txt").write_text("one\n", encoding="utf-8")
+    tracker.finish(first)
+
+    tracker.retarget(second_workspace)
+    second = tracker.capture_paths(["same.txt"])
+    (second_workspace / "same.txt").write_text("two\n", encoding="utf-8")
+    tracker.finish(second)
+
+    segments = tracker.changes["same.txt"].segments
+    assert [segment.workspace for segment in segments] == [str(first_workspace), str(second_workspace)]
