@@ -1012,7 +1012,10 @@ class CodingAgentApp:
         try:
             menu.tk_popup(x_root, y_root)
         finally:
-            menu.grab_release()
+            try:
+                menu.grab_release()
+            finally:
+                menu.destroy()
 
     def _show_current_project_menu(self) -> None:
         project = self._current_project()

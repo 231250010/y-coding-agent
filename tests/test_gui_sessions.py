@@ -85,6 +85,30 @@ def make_app_with_two_tasks() -> tuple[CodingAgentApp, TaskSession, TaskSession]
     return app, first, second
 
 
+def make_app_with_two_projects() -> tuple[CodingAgentApp, ProjectSession, ProjectSession, TaskSession, TaskSession]:
+    app = make_logic_only_app()
+    first_project = ProjectSession("p1", Path("first"), "First")
+    second_project = ProjectSession("p2", Path("second"), "Second")
+    first_task = TaskSession(
+        id="task-1",
+        project_id=first_project.id,
+        title="First task",
+        agent=FakeAgent(first_project.path),
+        cancel_event=threading.Event(),
+    )
+    second_task = TaskSession(
+        id="task-2",
+        project_id=second_project.id,
+        title="Second task",
+        agent=FakeAgent(second_project.path),
+        cancel_event=threading.Event(),
+    )
+    app.projects.extend((first_project, second_project))
+    app.tasks.extend((first_task, second_task))
+    app.current_id = first_task.id
+    return app, first_project, second_project, first_task, second_task
+
+
 def make_app_with_bound_task() -> tuple[CodingAgentApp, ProjectSession, TaskSession]:
     app = make_logic_only_app()
     project = ProjectSession("p1", Path("."), "Demo")
@@ -226,3 +250,63 @@ def test_rename_uses_menu_target_not_current_task() -> None:
     assert first.title != "Second renamed"
     assert second.title == "Second renamed"
     assert second.title_is_custom is True
+
+
+def test_rename_project_uses_target_without_mutating_its_path() -> None:
+    app, first, second, _first_task, _second_task = make_app_with_two_projects()
+    original_path = second.path
+
+    assert app._rename_tree_item(f"project:{second.id}", "  Renamed project  ") is True
+
+    assert first.title == "First"
+    assert second.title == "Renamed project"
+    assert second.path == original_path
+
+
+def test_project_removal_uses_target_not_selected_project(monkeypatch) -> None:
+    app, first, second, first_task, second_task = make_app_with_two_projects()
+    app.root = object()
+    app.task_tree = SimpleNamespace(selection=lambda: (f"project:{first.id}",))
+    monkeypatch.setattr(gui.messagebox, "askyesno", lambda *_args, **_kwargs: True)
+
+    app.delete_task(f"project:{second.id}")
+
+    assert first in app.projects
+    assert second not in app.projects
+    assert first_task.project_id == first.id
+    assert second_task.project_id is None
+
+
+def test_item_menu_destroys_transient_menu_after_it_unposts(monkeypatch) -> None:
+    app, task = make_app_with_projectless_task()
+    app.root = object()
+    created: list[object] = []
+
+    class RecordingMenu:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.destroyed = False
+            self.released = False
+            created.append(self)
+
+        def add_command(self, **_kwargs) -> None:
+            pass
+
+        def add_separator(self) -> None:
+            pass
+
+        def tk_popup(self, *_args) -> None:
+            pass
+
+        def grab_release(self) -> None:
+            self.released = True
+
+        def destroy(self) -> None:
+            self.destroyed = True
+
+    monkeypatch.setattr(gui.tk, "Menu", RecordingMenu)
+
+    app._show_item_menu(f"task:{task.id}", 20, 30)
+
+    assert len(created) == 1
+    assert created[0].released is True
+    assert created[0].destroyed is True
