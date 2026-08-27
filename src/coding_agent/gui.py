@@ -20,18 +20,27 @@ from .session_store import SessionStore
 from .tools import ToolRegistry
 
 
-BG = "#111318"
-PANEL = "#181b22"
-PANEL_ALT = "#20242d"
-BORDER = "#303642"
-TEXT = "#e7e9ee"
-MUTED = "#969daa"
-ACCENT = "#4f8cff"
-USER_BG = "#26344f"
-TOOL_BG = "#202a25"
-ERROR = "#ff7b72"
-SUCCESS = "#66c98f"
+# Visual system: a dark project rail beside a quiet, paper-like workspace.
+SIDEBAR = "#10232D"
+SIDEBAR_RAISED = "#193440"
+SIDEBAR_TEXT = "#F4F8F9"
+SIDEBAR_MUTED = "#9DB0B8"
+CANVAS = "#F3F6F7"
+SURFACE = "#FFFFFF"
+BORDER = "#D8E1E5"
+TEXT = "#17252D"
+MUTED = "#687983"
+ACCENT = "#176F89"
+ACCENT_HOVER = "#12596E"
+SIGNATURE = "#E36B4A"
+USER_BG = "#E8F1F4"
+TOOL_BG = "#EEF3F4"
+ERROR = "#BF4D49"
+SUCCESS = "#27825C"
+WARNING = "#B86A2C"
 UI_FONT = "Microsoft YaHei UI"
+DISPLAY_FONT = "Microsoft YaHei UI"
+MONO_FONT = "Cascadia Mono"
 
 
 @dataclass(slots=True)
@@ -62,7 +71,7 @@ class ConfigDialog(tk.Toplevel):
     def __init__(self, parent: tk.Misc, settings: LocalSettings, *, required: bool = False) -> None:
         super().__init__(parent)
         self.title("模型连接设置")
-        self.configure(bg=PANEL)
+        self.configure(bg=CANVAS)
         self.resizable(False, False)
         # A transient window inherits the visibility of its parent on Windows.
         # The root is intentionally hidden during first-run setup, so only make
@@ -91,10 +100,19 @@ class ConfigDialog(tk.Toplevel):
         self.geometry(f"+{x}+{y}")
 
     def _build(self) -> None:
-        body = tk.Frame(self, bg=PANEL, padx=24, pady=20)
+        body = tk.Frame(self, bg=CANVAS, padx=30, pady=26)
         body.pack(fill="both", expand=True)
-        tk.Label(body, text="模型连接", bg=PANEL, fg=TEXT, font=(UI_FONT, 16, "bold")).grid(
-            row=0, column=0, columnspan=3, sticky="w", pady=(0, 16)
+        tk.Label(body, text="模型连接", bg=CANVAS, fg=TEXT, font=(DISPLAY_FONT, 19)).grid(
+            row=0, column=0, columnspan=3, sticky="w"
+        )
+        tk.Label(
+            body,
+            text="连接信息仅保存在这台电脑上。",
+            bg=CANVAS,
+            fg=MUTED,
+            font=(UI_FONT, 10),
+        ).grid(
+            row=1, column=0, columnspan=3, sticky="w", pady=(3, 18)
         )
         rows = [
             ("API Key", "api_key", True),
@@ -103,8 +121,8 @@ class ConfigDialog(tk.Toplevel):
             ("上下文预算", "context_tokens", False),
             ("最大步骤", "max_steps", False),
         ]
-        for index, (label, key, secret) in enumerate(rows, start=1):
-            tk.Label(body, text=label, bg=PANEL, fg=MUTED, anchor="w", width=12).grid(
+        for index, (label, key, secret) in enumerate(rows, start=2):
+            tk.Label(body, text=label, bg=CANVAS, fg=MUTED, anchor="w", width=12).grid(
                 row=index, column=0, sticky="w", pady=6
             )
             entry = tk.Entry(
@@ -112,7 +130,7 @@ class ConfigDialog(tk.Toplevel):
                 textvariable=self.variables[key],
                 show="•" if secret else "",
                 width=44,
-                bg=PANEL_ALT,
+                bg=SURFACE,
                 fg=TEXT,
                 insertbackground=TEXT,
                 relief="flat",
@@ -122,8 +140,8 @@ class ConfigDialog(tk.Toplevel):
             )
             entry.grid(row=index, column=1, sticky="ew", ipady=6, pady=6)
 
-        option_row = len(rows) + 1
-        tk.Label(body, text="命令审批", bg=PANEL, fg=MUTED, anchor="w").grid(
+        option_row = len(rows) + 2
+        tk.Label(body, text="命令审批", bg=CANVAS, fg=MUTED, anchor="w").grid(
             row=option_row, column=0, sticky="w", pady=6
         )
         approval = ttk.Combobox(
@@ -138,25 +156,25 @@ class ConfigDialog(tk.Toplevel):
             body,
             text="将 API Key 保存在本地忽略配置中",
             variable=self.variables["remember_key"],
-            bg=PANEL,
+            bg=CANVAS,
             fg=MUTED,
-            activebackground=PANEL,
+            activebackground=CANVAS,
             activeforeground=TEXT,
-            selectcolor=PANEL_ALT,
+            selectcolor=SURFACE,
         ).grid(row=option_row + 1, column=1, sticky="w", pady=(6, 2))
         tk.Label(
             body,
             text="配置文件位于 .coding-agent/config.json，已被 Git 忽略。",
-            bg=PANEL,
+            bg=CANVAS,
             fg=MUTED,
             font=(UI_FONT, 9),
         ).grid(row=option_row + 2, column=1, sticky="w")
 
-        buttons = tk.Frame(body, bg=PANEL)
+        buttons = tk.Frame(body, bg=CANVAS)
         buttons.grid(row=option_row + 3, column=0, columnspan=3, sticky="e", pady=(20, 0))
         if not self.required:
             tk.Button(
-                buttons, text="取消", command=self._cancel, bg=PANEL_ALT, fg=TEXT, relief="flat", padx=18, pady=7
+                buttons, text="取消", command=self._cancel, bg=SURFACE, fg=TEXT, relief="flat", padx=18, pady=8
             ).pack(side="left", padx=(0, 8))
         tk.Button(
             buttons,
@@ -164,7 +182,7 @@ class ConfigDialog(tk.Toplevel):
             command=self._save,
             bg=ACCENT,
             fg="white",
-            activebackground="#3975db",
+            activebackground=ACCENT_HOVER,
             activeforeground="white",
             relief="flat",
             padx=18,
@@ -232,125 +250,201 @@ class CodingAgentApp:
         self._render_current()
         self.root.after(80, self._poll_events)
         self.root.protocol("WM_DELETE_WINDOW", self._close)
+        self.root.bind("<Control-n>", lambda _event: self.new_task())
+        self.root.bind("<Control-o>", lambda _event: self.choose_project())
 
     def _configure_window(self) -> None:
-        self.root.title("Coding Agent")
-        self.root.geometry("1180x760")
-        self.root.minsize(900, 600)
-        self.root.configure(bg=BG)
+        self.root.title("Coding Agent · 本地代码工作台")
+        self.root.geometry("1240x800")
+        self.root.minsize(960, 640)
+        self.root.configure(bg=CANVAS)
         style = ttk.Style(self.root)
         style.theme_use("clam")
-        style.configure("TCombobox", fieldbackground=PANEL_ALT, background=PANEL_ALT, foreground=TEXT)
+        style.configure(
+            "TCombobox",
+            fieldbackground=SURFACE,
+            background=SURFACE,
+            foreground=TEXT,
+            arrowcolor=MUTED,
+            bordercolor=BORDER,
+        )
 
     def _build_layout(self) -> None:
-        split = tk.PanedWindow(self.root, orient="horizontal", bg=BORDER, sashwidth=2, bd=0)
+        split = tk.PanedWindow(self.root, orient="horizontal", bg=BORDER, sashwidth=1, bd=0)
         split.pack(fill="both", expand=True)
 
-        sidebar = tk.Frame(split, bg=PANEL, width=275)
-        content = tk.Frame(split, bg=BG)
-        split.add(sidebar, minsize=230, width=275)
-        split.add(content, minsize=620)
+        sidebar = tk.Frame(split, bg=SIDEBAR, width=294)
+        content = tk.Frame(split, bg=CANVAS)
+        split.add(sidebar, minsize=250, width=294)
+        split.add(content, minsize=680)
 
-        side_header = tk.Frame(sidebar, bg=PANEL, padx=16, pady=16)
+        side_header = tk.Frame(sidebar, bg=SIDEBAR, padx=18, pady=19)
         side_header.pack(fill="x")
-        tk.Label(side_header, text="项目", bg=PANEL, fg=TEXT, font=(UI_FONT, 17, "bold")).pack(side="left")
-        tk.Button(
+        mark = tk.Label(
             side_header,
-            text="＋ 项目",
-            command=self.choose_project,
-            bg=ACCENT,
+            text="CA",
+            bg=SIGNATURE,
             fg="white",
-            activebackground="#3975db",
-            activeforeground="white",
+            font=(DISPLAY_FONT, 11),
+            padx=8,
+            pady=7,
+        )
+        mark.pack(side="left", padx=(0, 10))
+        identity = tk.Frame(side_header, bg=SIDEBAR)
+        identity.pack(side="left", fill="x", expand=True)
+        tk.Label(
+            identity,
+            text="CODING AGENT",
+            bg=SIDEBAR,
+            fg=SIDEBAR_TEXT,
+            font=(DISPLAY_FONT, 12),
+        ).pack(anchor="w")
+        tk.Label(
+            identity,
+            text="本地代码工作台",
+            bg=SIDEBAR,
+            fg=SIDEBAR_MUTED,
+            font=(UI_FONT, 9),
+        ).pack(anchor="w")
+
+        section = tk.Frame(sidebar, bg=SIDEBAR, padx=18)
+        section.pack(fill="x", pady=(10, 8))
+        tk.Label(
+            section,
+            text="项目与对话",
+            bg=SIDEBAR,
+            fg=SIDEBAR_MUTED,
+            font=(UI_FONT, 9, "bold"),
+        ).pack(side="left")
+        tk.Button(
+            section,
+            text="添加项目",
+            command=self.choose_project,
+            bg=SIDEBAR,
+            fg=SIDEBAR_TEXT,
+            activebackground=SIDEBAR_RAISED,
+            activeforeground=SIDEBAR_TEXT,
             relief="flat",
-            padx=10,
-            pady=5,
+            bd=0,
+            cursor="hand2",
+            padx=4,
         ).pack(side="right")
 
-        task_actions = tk.Frame(sidebar, bg=PANEL, padx=12)
-        task_actions.pack(fill="x", pady=(0, 8))
-        self._flat_button(task_actions, "＋ 新对话", self.new_task).pack(fill="x")
+        task_actions = tk.Frame(sidebar, bg=SIDEBAR, padx=14)
+        task_actions.pack(fill="x", pady=(0, 10))
+        self._sidebar_button(task_actions, "＋  新建对话", self.new_task, primary=True).pack(fill="x")
 
         tree_style = ttk.Style(self.root)
         tree_style.configure(
             "Tasks.Treeview",
-            background=PANEL,
-            fieldbackground=PANEL,
-            foreground=TEXT,
+            background=SIDEBAR,
+            fieldbackground=SIDEBAR,
+            foreground=SIDEBAR_TEXT,
             borderwidth=0,
-            rowheight=31,
+            rowheight=34,
             font=(UI_FONT, 10),
+            indent=18,
+            relief="flat",
+            bordercolor=SIDEBAR,
+            lightcolor=SIDEBAR,
+            darkcolor=SIDEBAR,
+            focuscolor=SIDEBAR,
         )
-        tree_style.map("Tasks.Treeview", background=[("selected", PANEL_ALT)], foreground=[("selected", TEXT)])
+        tree_style.layout("Tasks.Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
+        tree_style.map(
+            "Tasks.Treeview",
+            background=[("selected", SIDEBAR_RAISED)],
+            foreground=[("selected", SIDEBAR_TEXT)],
+        )
         self.task_tree = ttk.Treeview(
             sidebar,
             style="Tasks.Treeview",
             show="tree",
             selectmode="browse",
         )
-        self.task_tree.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self.task_tree.tag_configure("project", foreground=SIDEBAR_MUTED, font=(UI_FONT, 9, "bold"))
+        self.task_tree.tag_configure("task", foreground=SIDEBAR_TEXT, font=(UI_FONT, 10))
+        self.task_tree.tag_configure("running", foreground="#68C5D6", font=(UI_FONT, 10, "bold"))
+        self.task_tree.pack(fill="both", expand=True, padx=10, pady=(0, 8))
         self.task_tree.bind("<<TreeviewSelect>>", self._select_task)
 
-        side_footer = tk.Frame(sidebar, bg=PANEL, padx=12, pady=12)
+        side_footer = tk.Frame(sidebar, bg=SIDEBAR, padx=14, pady=14)
         side_footer.pack(fill="x")
-        self._flat_button(side_footer, "删除", self.delete_task).pack(side="left")
-        self._flat_button(side_footer, "设置", self.open_settings).pack(side="right")
+        self._sidebar_button(side_footer, "移除", self.delete_task).pack(side="left")
+        self._sidebar_button(side_footer, "连接设置", self.open_settings).pack(side="right")
 
-        header = tk.Frame(content, bg=BG, padx=24, pady=14)
+        self.activity_bar = tk.Frame(content, bg=ACCENT, height=4)
+        self.activity_bar.pack(fill="x")
+        self.activity_bar.pack_propagate(False)
+
+        header = tk.Frame(content, bg=CANVAS, padx=34, pady=18)
         header.pack(fill="x")
-        self.title_label = tk.Label(header, text="", bg=BG, fg=TEXT, font=(UI_FONT, 16, "bold"))
-        self.title_label.pack(side="left")
-        self.status_label = tk.Label(header, text="就绪", bg=BG, fg=MUTED, font=(UI_FONT, 10))
+        title_stack = tk.Frame(header, bg=CANVAS)
+        title_stack.pack(side="left", fill="x", expand=True)
+        self.project_label = tk.Label(
+            title_stack,
+            text="",
+            bg=CANVAS,
+            fg=ACCENT,
+            font=(UI_FONT, 9, "bold"),
+        )
+        self.project_label.pack(anchor="w")
+        self.title_label = tk.Label(title_stack, text="", bg=CANVAS, fg=TEXT, font=(DISPLAY_FONT, 20))
+        self.title_label.pack(anchor="w", pady=(2, 0))
+        self.status_label = tk.Label(header, text="就绪", bg=CANVAS, fg=MUTED, font=(UI_FONT, 10))
         self.status_label.pack(side="right", padx=(12, 0))
         self.stop_button = tk.Button(
             header,
             text="停止",
             command=self.stop_task,
             state="disabled",
-            bg="#40252a",
-            fg="#ff9b98",
-            disabledforeground="#70585c",
-            activebackground="#553036",
-            activeforeground="white",
+            bg="#F7E8E5",
+            fg=ERROR,
+            disabledforeground="#B9A8A5",
+            activebackground="#EFD8D4",
+            activeforeground=ERROR,
             relief="flat",
+            cursor="hand2",
             padx=12,
-            pady=5,
+            pady=7,
         )
         self.stop_button.pack(side="right")
 
-        transcript_frame = tk.Frame(content, bg=BG, padx=24)
+        transcript_outer = tk.Frame(content, bg=CANVAS, padx=34)
+        transcript_outer.pack(fill="both", expand=True)
+        transcript_frame = tk.Frame(transcript_outer, bg=SURFACE, highlightthickness=1, highlightbackground=BORDER)
         transcript_frame.pack(fill="both", expand=True)
-        scrollbar = tk.Scrollbar(transcript_frame, relief="flat")
+        scrollbar = tk.Scrollbar(transcript_frame, relief="flat", bd=0)
         scrollbar.pack(side="right", fill="y")
         self.transcript = tk.Text(
             transcript_frame,
             wrap="word",
             state="disabled",
-            bg=BG,
+            bg=SURFACE,
             fg=TEXT,
             insertbackground=TEXT,
             relief="flat",
             highlightthickness=0,
             font=(UI_FONT, 11),
-            padx=10,
-            pady=10,
+            padx=28,
+            pady=22,
             yscrollcommand=scrollbar.set,
         )
         self.transcript.pack(fill="both", expand=True)
         scrollbar.configure(command=self.transcript.yview)
         self._configure_transcript_tags()
 
-        composer = tk.Frame(content, bg=BG, padx=24, pady=18)
+        composer = tk.Frame(content, bg=CANVAS, padx=34, pady=14)
         composer.pack(fill="x")
-        input_border = tk.Frame(composer, bg=BORDER, padx=1, pady=1)
-        input_border.pack(fill="x")
-        input_inner = tk.Frame(input_border, bg=PANEL_ALT, padx=10, pady=10)
+        self.input_border = tk.Frame(composer, bg=BORDER, padx=1, pady=1)
+        self.input_border.pack(fill="x")
+        input_inner = tk.Frame(self.input_border, bg=SURFACE, padx=15, pady=12)
         input_inner.pack(fill="x")
         self.input_box = tk.Text(
             input_inner,
-            height=4,
+            height=3,
             wrap="word",
-            bg=PANEL_ALT,
+            bg=SURFACE,
             fg=TEXT,
             insertbackground=TEXT,
             relief="flat",
@@ -360,53 +454,68 @@ class CodingAgentApp:
         )
         self.input_box.pack(fill="x")
         self.input_box.bind("<Control-Return>", self._send_shortcut)
-        composer_actions = tk.Frame(input_inner, bg=PANEL_ALT)
+        self.input_box.bind("<FocusIn>", lambda _event: self.input_border.configure(bg=ACCENT))
+        self.input_box.bind("<FocusOut>", lambda _event: self.input_border.configure(bg=BORDER))
+        composer_actions = tk.Frame(input_inner, bg=SURFACE)
         composer_actions.pack(fill="x", pady=(8, 0))
         self.workspace_label = tk.Label(
             composer_actions,
             text=str(self.config.workspace),
-            bg=PANEL_ALT,
+            bg=SURFACE,
             fg=MUTED,
-            font=(UI_FONT, 9),
+            font=(MONO_FONT, 9),
         )
         self.workspace_label.pack(side="left")
+        tk.Label(
+            composer_actions,
+            text="Ctrl + Enter 运行",
+            bg=SURFACE,
+            fg=MUTED,
+            font=(UI_FONT, 9),
+        ).pack(side="right", padx=(0, 12))
         self.send_button = tk.Button(
             composer_actions,
-            text="发送  Ctrl+Enter",
+            text="运行任务  →",
             command=self.send_message,
-            bg=ACCENT,
+            bg=SIGNATURE,
             fg="white",
-            activebackground="#3975db",
+            activebackground="#C9593D",
             activeforeground="white",
             relief="flat",
-            padx=14,
-            pady=6,
+            cursor="hand2",
+            padx=18,
+            pady=8,
         )
         self.send_button.pack(side="right")
 
     @staticmethod
-    def _flat_button(parent: tk.Misc, text: str, command: Any) -> tk.Button:
+    def _sidebar_button(parent: tk.Misc, text: str, command: Any, *, primary: bool = False) -> tk.Button:
         return tk.Button(
             parent,
             text=text,
             command=command,
-            bg=PANEL_ALT,
-            fg=MUTED,
-            activebackground=BORDER,
-            activeforeground=TEXT,
+            bg=SIDEBAR_RAISED if primary else SIDEBAR,
+            fg=SIDEBAR_TEXT if primary else SIDEBAR_MUTED,
+            activebackground="#214451",
+            activeforeground=SIDEBAR_TEXT,
             relief="flat",
-            padx=10,
-            pady=5,
+            bd=0,
+            cursor="hand2",
+            padx=12,
+            pady=8 if primary else 5,
         )
 
     def _configure_transcript_tags(self) -> None:
-        self.transcript.tag_configure("user_label", foreground="#8fb5ff", font=(UI_FONT, 10, "bold"), spacing1=12)
-        self.transcript.tag_configure("user", foreground=TEXT, background=USER_BG, lmargin1=14, lmargin2=14, rmargin=14, spacing3=12)
-        self.transcript.tag_configure("assistant_label", foreground=SUCCESS, font=(UI_FONT, 10, "bold"), spacing1=12)
-        self.transcript.tag_configure("assistant", foreground=TEXT, lmargin1=14, lmargin2=14, rmargin=14, spacing3=12)
-        self.transcript.tag_configure("tool", foreground="#b8c8bc", background=TOOL_BG, lmargin1=14, lmargin2=14, rmargin=14, spacing1=5, spacing3=5)
-        self.transcript.tag_configure("error", foreground=ERROR, lmargin1=14, lmargin2=14, rmargin=14, spacing1=5, spacing3=5)
-        self.transcript.tag_configure("system", foreground=MUTED, lmargin1=14, lmargin2=14, rmargin=14, spacing1=5, spacing3=5)
+        self.transcript.tag_configure("user_label", foreground=ACCENT, font=(UI_FONT, 9, "bold"), spacing1=16, spacing3=5)
+        self.transcript.tag_configure("user", foreground=TEXT, background=USER_BG, lmargin1=16, lmargin2=16, rmargin=16, spacing1=9, spacing3=12)
+        self.transcript.tag_configure("assistant_label", foreground=SUCCESS, font=(UI_FONT, 9, "bold"), spacing1=18, spacing3=5)
+        self.transcript.tag_configure("assistant", foreground=TEXT, lmargin1=16, lmargin2=16, rmargin=16, spacing3=14)
+        self.transcript.tag_configure("tool", foreground="#45616A", background=TOOL_BG, font=(MONO_FONT, 9), lmargin1=16, lmargin2=16, rmargin=16, spacing1=7, spacing3=7)
+        self.transcript.tag_configure("error", foreground=ERROR, lmargin1=16, lmargin2=16, rmargin=16, spacing1=7, spacing3=7)
+        self.transcript.tag_configure("system", foreground=MUTED, lmargin1=16, lmargin2=16, rmargin=16, spacing1=7, spacing3=7)
+        self.transcript.tag_configure("empty_title", foreground=TEXT, font=(DISPLAY_FONT, 18), justify="center", spacing1=80, spacing3=8)
+        self.transcript.tag_configure("empty_body", foreground=MUTED, font=(UI_FONT, 10), justify="center", spacing3=5)
+        self.transcript.tag_configure("empty_hint", foreground=ACCENT, font=(UI_FONT, 10), justify="center", spacing1=14)
 
     def _make_agent(self, task_id: str, cancel_event: threading.Event, workspace: Path) -> CodingAgent:
         model = OpenAIChatModel(
@@ -564,7 +673,7 @@ class CodingAgentApp:
         session = self._current()
         if session and session.running:
             session.cancel_event.set()
-            self.status_label.configure(text="正在停止…", fg="#ffbc7a")
+            self._set_status("正在停止…", WARNING)
 
     def _request_approval(self, task_id: str, command: str, risk: RiskLevel, reason: str) -> bool:
         signal = threading.Event()
@@ -602,6 +711,12 @@ class CodingAgentApp:
             self._save_sessions()
             if task_id == self.current_id:
                 self._render_current()
+                if kind == "complete":
+                    self._set_status("任务完成", SUCCESS)
+                elif kind == "cancelled":
+                    self._set_status("已停止", WARNING)
+                else:
+                    self._set_status("需要处理", ERROR)
         elif kind == "approval":
             _, task_id, command, risk, reason, signal, response = event
             session = self._find_task(task_id)
@@ -621,22 +736,26 @@ class CodingAgentApp:
             return
         if name == "model_start":
             status = f"模型思考中 · {data['step']}/{data['max_steps']}"
+            tone = ACCENT
         elif name == "summary_start":
             status = "正在压缩上下文"
+            tone = WARNING
             session.entries.append(ChatEntry("system", "正在压缩较早的对话上下文…"))
         elif name == "tool_start":
             status = f"正在执行 {data['name']}"
+            tone = SIGNATURE
             arguments = data.get("arguments", "")
             session.entries.append(ChatEntry("tool", f"→ {data['name']}\n{arguments[:1200]}"))
         elif name == "tool_end":
             status = "工具执行完成" if data["ok"] else "工具执行失败"
+            tone = SUCCESS if data["ok"] else ERROR
             detail = data.get("error") or data.get("output") or ""
             marker = "✓" if data["ok"] else "✗"
             session.entries.append(ChatEntry("tool" if data["ok"] else "error", f"{marker} {data['name']}\n{detail[:2000]}"))
         else:
             return
         if task_id == self.current_id:
-            self.status_label.configure(text=status, fg=MUTED)
+            self._set_status(status, tone)
             self._render_transcript(session)
 
     def _select_task(self, _event: tk.Event[Any]) -> None:
@@ -660,10 +779,11 @@ class CodingAgentApp:
         self.task_tree.delete(*self.task_tree.get_children())
         for project in self.projects:
             project_item = f"project:{project.id}"
-            self.task_tree.insert("", "end", iid=project_item, text=project.title, open=True)
+            self.task_tree.insert("", "end", iid=project_item, text=project.title.upper(), open=True, tags=("project",))
             for task in (candidate for candidate in self.tasks if candidate.project_id == project.id):
-                marker = "● " if task.running else "  "
-                self.task_tree.insert(project_item, "end", iid=f"task:{task.id}", text=marker + task.title)
+                marker = "●  " if task.running else "·  "
+                tags = ("running",) if task.running else ("task",)
+                self.task_tree.insert(project_item, "end", iid=f"task:{task.id}", text=marker + task.title, tags=tags)
         if self.current_id and self.task_tree.exists(f"task:{self.current_id}"):
             self.task_tree.selection_set(f"task:{self.current_id}")
             self.task_tree.see(f"task:{self.current_id}")
@@ -674,19 +794,22 @@ class CodingAgentApp:
             return
         project = self._find_project(session.project_id)
         self.title_label.configure(text=session.title)
-        self.status_label.configure(text="运行中" if session.running else "就绪", fg=MUTED)
+        self._set_status("运行中" if session.running else "就绪", ACCENT if session.running else MUTED)
         self.send_button.configure(state="disabled" if session.running else "normal")
         self.stop_button.configure(state="normal" if session.running else "disabled")
         self.input_box.configure(state="disabled" if session.running else "normal")
         if project:
-            self.workspace_label.configure(text=f"{project.title}  ·  {project.path}")
+            self.project_label.configure(text=f"{project.title.upper()}  /  对话")
+            self.workspace_label.configure(text=f"工作目录  {project.path}")
         self._render_transcript(session)
 
     def _render_transcript(self, session: TaskSession) -> None:
         self.transcript.configure(state="normal")
         self.transcript.delete("1.0", "end")
         if not session.entries:
-            self.transcript.insert("end", "描述你希望在当前工作区完成的编程任务。\n", "system")
+            self.transcript.insert("end", "从一个具体改动开始\n", "empty_title")
+            self.transcript.insert("end", "说明目标、预期结果，或直接指出需要检查的文件。\n", "empty_body")
+            self.transcript.insert("end", "例如：读取项目，修复失败的测试并解释原因\n", "empty_hint")
         for entry in session.entries:
             if entry.kind == "user":
                 self.transcript.insert("end", "你\n", "user_label")
@@ -698,6 +821,10 @@ class CodingAgentApp:
                 self.transcript.insert("end", entry.text + "\n", entry.kind)
         self.transcript.configure(state="disabled")
         self.transcript.see("end")
+
+    def _set_status(self, text: str, tone: str) -> None:
+        self.status_label.configure(text=text, fg=tone)
+        self.activity_bar.configure(bg=tone)
 
     def open_settings(self) -> None:
         if any(task.running for task in self.tasks):
