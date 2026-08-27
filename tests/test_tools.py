@@ -12,6 +12,16 @@ def registry(tmp_path: Path, approval: bool = True, max_output: int = 16_000) ->
     return ToolRegistry(tmp_path, approver=lambda *_args: approval, max_output=max_output)
 
 
+def test_projectless_registry_exposes_no_tools() -> None:
+    registry = ToolRegistry(None)
+
+    assert registry.workspace is None
+    assert registry.schemas() == []
+    result = registry.execute("read_file", {"path": "README.md"})
+    assert result.ok is False
+    assert result.error == "当前对话尚未选择工作目录"
+
+
 def test_write_read_list_and_replace(tmp_path: Path) -> None:
     tools = registry(tmp_path)
     written = tools.execute("write_file", {"path": "src/你好.txt", "content": "第一行\n旧内容"})

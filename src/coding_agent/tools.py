@@ -75,26 +75,34 @@ class LocalTool:
 class ToolRegistry:
     def __init__(
         self,
-        workspace: Path,
+        workspace: Path | None,
         *,
         approver: ApprovalCallback | None = None,
         is_cancelled: CancelCallback | None = None,
         approval_mode: str = "ask",
         max_output: int = MAX_TOOL_OUTPUT,
     ) -> None:
-        self.workspace = workspace.resolve()
-        self.guard = PathGuard(self.workspace)
-        self.policy = CommandPolicy(self.workspace)
         self.approver = approver or (lambda _command, _risk, _reason: False)
         self.is_cancelled = is_cancelled or (lambda: False)
         self.approval_mode = approval_mode
         self.max_output = max_output
+        if workspace is None:
+            self.workspace = None
+            self.guard = None
+            self.policy = None
+            self._tools = {}
+            return
+        self.workspace = workspace.resolve()
+        self.guard = PathGuard(self.workspace)
+        self.policy = CommandPolicy(self.workspace)
         self._tools = {tool.name: tool for tool in self._build_tools()}
 
     def schemas(self) -> list[dict[str, Any]]:
         return [tool.schema() for tool in self._tools.values()]
 
     def execute(self, name: str, arguments: dict[str, Any]) -> ToolResult:
+        if self.workspace is None:
+            return ToolResult(False, error="当前对话尚未选择工作目录")
         tool = self._tools.get(name)
         if tool is None:
             return ToolResult(False, error=f"未知工具: {name}")
