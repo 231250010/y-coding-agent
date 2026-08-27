@@ -2,7 +2,7 @@
 
 这是一个个人独立实现的编程智能体。它能与支持 OpenAI Chat Completions tool calling 的模型交互，自主读取和修改工作区文件、执行命令、观察结果并继续迭代，直到完成任务或触发安全终止条件。
 
-项目重点不是界面，而是完整展示一个 Agent 的核心工作机制：对话历史、上下文压缩、工具协议、本地调度、循环控制、安全策略和错误恢复均由本仓库自行实现。
+项目提供类似 Codex 的双栏桌面界面：左侧管理任务，右侧显示对话、工具执行过程和输入区。对话历史、上下文压缩、工具协议、本地调度、循环控制、安全策略和错误恢复均由本仓库自行实现。
 
 ## 依赖边界
 
@@ -48,7 +48,9 @@
 - `tools.py`：工具 Schema、参数校验和六个本地工具。
 - `safety.py`：命令风险分类。
 - `context.py`：token 粗略估算、完整轮次摘要和保守裁剪。
-- `cli.py`：单次与交互式终端入口。
+- `gui.py`：桌面窗口、任务管理、后台执行、审批弹窗和停止操作。
+- `local_settings.py`：被 Git 忽略的本地 GUI 配置。
+- `cli.py`：保留的备用终端入口，不是默认产品界面。
 
 ## 安装
 
@@ -67,52 +69,53 @@ source .venv/bin/activate
 python -m pip install -e ".[dev]"
 ```
 
-运行前需要在当前终端进程中提供下列环境变量：
+首次启动时会显示“模型连接设置”窗口。连接配置完整并保存后，后续启动会直接进入主界面。API key 可以只在当前会话中使用，也可按需保存到被 Git 忽略的 `.coding-agent/config.json`。
+
+配置也可以通过环境变量预填：
 
 - `CODING_AGENT_API_KEY`：API 凭据，必需。
-- `CODING_AGENT_MODEL`：兼容 Chat Completions 和 function calling 的模型名称，必需，也可由 `--model` 覆盖。
+- `CODING_AGENT_MODEL`：兼容 Chat Completions 和 function calling 的模型名称。
 - `CODING_AGENT_BASE_URL`：兼容网关地址，可选；未设置时使用客户端默认地址。
 - `CODING_AGENT_CONTEXT_TOKENS`：上下文预算，可选，默认 `32000`。
 
-仓库不提供、记录或读取固定凭据文件。请仅在运行环境中设置真实凭据，并确保 `.env` 等本地文件不进入版本控制。
+`.coding-agent/`、`.env` 和虚拟环境均已加入 `.gitignore`。真实凭据不会显示在任务记录中，也不会被提交到仓库。
 
 ## 使用
 
-进入连续交互模式：
+安装后启动桌面应用：
 
 ```powershell
-coding-agent --workspace C:\path\to\project
+coding-agent
 ```
 
-完成一个任务后退出：
+也可以不依赖脚本入口：
 
 ```powershell
-coding-agent --workspace C:\path\to\project "为计算器添加除零测试并修复问题"
+python -m coding_agent
 ```
 
-也可以不安装命令入口：
+启动时指定初始工作区：
 
 ```powershell
 python -m coding_agent --workspace C:\path\to\project
 ```
 
-主要参数：
+桌面界面包含：
 
-```text
---workspace PATH          工具可以操作的工作区，默认为当前目录
---model MODEL             覆盖环境中的模型名称
---base-url URL            覆盖兼容 API 地址
---max-steps N             单个任务最多调用模型的步数，默认 20
---approval-mode ask       只确认有风险或未知的命令，默认值
---approval-mode always    每条命令都需要人工确认
+- 左侧项目树：一个工作目录对应一个项目，项目下可新建、切换和删除多段独立对话。
+- 右侧交互区：用户消息、模型答复以及实时工具执行记录。
+- 底部输入框：`Ctrl+Enter` 发送任务。
+- 停止按钮：请求中止 Agent 循环，并尝试终止正在运行的本地命令。
+- “＋项目”目录选择器：为不同项目自主选择工作目录；重复选择同一路径会定位到已有项目。
+- 设置窗口：切换兼容 API、模型、上下文预算和审批模式。
+- 命令审批弹窗：执行联网、安装、删除或未知命令前请求确认。
+- 项目和对话历史保存在 `.coding-agent/sessions.json`，不会进入 Git；每段对话始终绑定所属项目目录。
+
+备用 CLI 仍可用于自动化和调试：
+
+```powershell
+coding-agent-cli --workspace C:\path\to\project "检查并修复测试"
 ```
-
-交互模式内置命令：
-
-- `/help`：显示帮助。
-- `/status`：显示不含凭据的当前配置。
-- `/clear`：清空内存中的会话历史。
-- `/exit`：退出程序。
 
 ## 本地工具
 
@@ -175,7 +178,7 @@ python -m pytest
 - 路径穿越和外部符号链接；
 - 命令成功、非零退出、超时、审批与拒绝；
 - 上下文完整轮次摘要和摘要失败回退；
-- 配置优先级、CLI 参数与依赖边界。
+- 配置优先级、GUI/CLI 入口与依赖边界。
 
 ## 人工端到端演示
 
@@ -192,4 +195,3 @@ python -m pytest
 - 只处理 UTF-8 文本文件，不编辑二进制文件。
 - 不自动提交 Git、不提供插件系统、网页界面或自主网络搜索。
 - 不同兼容网关对 Chat Completions tool calling 的实现程度可能不同。
-

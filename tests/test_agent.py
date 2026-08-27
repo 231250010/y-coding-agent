@@ -121,3 +121,16 @@ def test_clear_preserves_only_system_prompt(tmp_path: Path) -> None:
     agent.clear()
     assert len(agent.history) == 1 and agent.history[0]["role"] == "system"
 
+
+def test_cancel_stops_before_model_call(tmp_path: Path) -> None:
+    model = ScriptedModel([AssistantResponse("should not be used")])
+    tools = ToolRegistry(tmp_path, approver=lambda *_args: True)
+    agent = CodingAgent(
+        model,
+        tools,
+        ContextManager(100_000),
+        is_cancelled=lambda: True,
+    )
+    with pytest.raises(AgentStopped, match="用户停止"):
+        agent.run("task")
+    assert not model.requests

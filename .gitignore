@@ -9,6 +9,6 @@ venv/
 .env
 .env.*
 !.env.example
+.coding-agent/
 build/
 dist/
-

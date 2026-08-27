@@ -17,6 +17,10 @@ class AgentStopped(RuntimeError):
     """Raised when the local agent loop reaches a safety termination condition."""
 
 
+class AgentCancelled(AgentStopped):
+    """Raised when a user requests cancellation from an interactive frontend."""
+
+
 class CodingAgent:
     def __init__(
         self,
@@ -26,6 +30,7 @@ class CodingAgent:
         *,
         max_steps: int = 20,
         on_event: EventCallback | None = None,
+        is_cancelled: Callable[[], bool] | None = None,
         system_prompt: str = SYSTEM_PROMPT,
     ) -> None:
         self.model = model
@@ -33,6 +38,7 @@ class CodingAgent:
         self.context = context
         self.max_steps = max_steps
         self.on_event = on_event or (lambda _name, _data: None)
+        self.is_cancelled = is_cancelled or (lambda: False)
         self.system_prompt = system_prompt
         self.history: list[Message] = [{"role": "system", "content": system_prompt}]
 
@@ -47,9 +53,11 @@ class CodingAgent:
         repeated_errors = 0
 
         for step in range(1, self.max_steps + 1):
+            self._check_cancelled()
             self.on_event("model_start", {"step": step, "max_steps": self.max_steps})
             self.history = self.context.compact(self.history, self._summarize)
             response = self.model.complete(self.history, self.tools.schemas())
+            self._check_cancelled()
             self._append_assistant(response)
 
             if not response.tool_calls:
@@ -60,6 +68,7 @@ class CodingAgent:
                 return content
 
             for call in response.tool_calls:
+                self._check_cancelled()
                 self.on_event("tool_start", {"name": call.name, "arguments": call.arguments})
                 result = self._execute_call(call.name, call.arguments)
                 self.history.append(
@@ -69,6 +78,7 @@ class CodingAgent:
                     "tool_end",
                     {"name": call.name, "ok": result.ok, "output": result.output, "error": result.error},
                 )
+                self._check_cancelled()
                 if result.ok:
                     last_error = None
                     repeated_errors = 0
@@ -80,6 +90,10 @@ class CodingAgent:
                         raise AgentStopped(f"连续三次发生相同工具错误，已停止: {result.error}")
 
         raise AgentStopped(f"达到最大步骤数 {self.max_steps}，任务未正常结束")
+
+    def _check_cancelled(self) -> None:
+        if self.is_cancelled():
+            raise AgentCancelled("任务已由用户停止")
 
     def _append_assistant(self, response: AssistantResponse) -> None:
         message: Message = {"role": "assistant", "content": response.content}
@@ -109,4 +123,3 @@ class CodingAgent:
             raise ModelError("上下文摘要响应无效")
         self.on_event("summary_end", {})
         return response.content
-

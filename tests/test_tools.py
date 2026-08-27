@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import pytest
@@ -109,3 +110,22 @@ def test_command_timeout(tmp_path: Path) -> None:
     command = 'python -c "import time; time.sleep(3)"'
     result = registry(tmp_path).execute("run_command", {"command": command, "timeout_seconds": 1})
     assert not result.ok and "超过 1 秒" in (result.error or "")
+
+
+def test_command_can_be_cancelled(tmp_path: Path) -> None:
+    cancelled = threading.Event()
+    tools = ToolRegistry(
+        tmp_path,
+        approver=lambda *_args: True,
+        is_cancelled=cancelled.is_set,
+    )
+    timer = threading.Timer(0.2, cancelled.set)
+    timer.start()
+    try:
+        result = tools.execute(
+            "run_command",
+            {"command": 'python -c "import time; time.sleep(5)"', "timeout_seconds": 10},
+        )
+    finally:
+        timer.cancel()
+    assert not result.ok and "用户停止" in (result.error or "")

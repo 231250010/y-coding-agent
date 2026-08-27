@@ -6,6 +6,7 @@ import os
 import signal
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -16,6 +17,7 @@ from .safety import CommandPolicy, RiskLevel
 MAX_FILE_CHARS = 200_000
 MAX_TOOL_OUTPUT = 16_000
 ApprovalCallback = Callable[[str, RiskLevel, str], bool]
+CancelCallback = Callable[[], bool]
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +78,7 @@ class ToolRegistry:
         workspace: Path,
         *,
         approver: ApprovalCallback | None = None,
+        is_cancelled: CancelCallback | None = None,
         approval_mode: str = "ask",
         max_output: int = MAX_TOOL_OUTPUT,
     ) -> None:
@@ -83,6 +86,7 @@ class ToolRegistry:
         self.guard = PathGuard(self.workspace)
         self.policy = CommandPolicy(self.workspace)
         self.approver = approver or (lambda _command, _risk, _reason: False)
+        self.is_cancelled = is_cancelled or (lambda: False)
         self.approval_mode = approval_mode
         self.max_output = max_output
         self._tools = {tool.name: tool for tool in self._build_tools()}
@@ -356,17 +360,40 @@ class ToolRegistry:
         else:
             popen_options["start_new_session"] = True
         process = subprocess.Popen(shell_command, **popen_options)
-        try:
-            stdout, stderr = process.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            self._terminate_process_tree(process)
-            stdout, stderr = process.communicate()
-            partial = "\n".join(part.rstrip() for part in [stdout, stderr] if part)
-            return ToolResult(False, output=self._truncate(partial), error=f"命令超过 {timeout} 秒后终止")
-        except KeyboardInterrupt:
-            self._terminate_process_tree(process)
-            process.communicate()
-            raise
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(shell_command, timeout)
+                stdout, stderr = process.communicate(timeout=min(0.2, remaining))
+                break
+            except subprocess.TimeoutExpired:
+                if self.is_cancelled() or time.monotonic() >= deadline:
+                    self._terminate_process_tree(process)
+                    try:
+                        stdout, stderr = process.communicate(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        # A restricted Windows environment can prevent taskkill
+                        # from closing an inherited child pipe immediately. Do
+                        # not let output collection make the GUI appear frozen.
+                        process.kill()
+                        if process.stdout:
+                            process.stdout.close()
+                        if process.stderr:
+                            process.stderr.close()
+                        try:
+                            process.wait(timeout=1)
+                        except subprocess.TimeoutExpired:
+                            pass
+                        stdout, stderr = "", ""
+                    partial = "\n".join(part.rstrip() for part in [stdout, stderr] if part)
+                    reason = "命令已由用户停止" if self.is_cancelled() else f"命令超过 {timeout} 秒后终止"
+                    return ToolResult(False, output=self._truncate(partial), error=reason)
+            except KeyboardInterrupt:
+                self._terminate_process_tree(process)
+                process.communicate()
+                raise
 
         output = "\n".join(part for part in [stdout.rstrip(), stderr.rstrip()] if part)
         rendered = f"exit_code={process.returncode}"
@@ -379,11 +406,15 @@ class ToolRegistry:
         if process.poll() is not None:
             return
         if os.name == "nt":
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
-                capture_output=True,
-                check=False,
-            )
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                    capture_output=True,
+                    check=False,
+                    timeout=1,
+                )
+            except subprocess.TimeoutExpired:
+                process.kill()
         else:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
