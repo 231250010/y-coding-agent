@@ -15,6 +15,7 @@ from .config import Config, ConfigError
 from .context import ContextManager
 from .local_settings import LocalSettings
 from .model import ModelError, OpenAIChatModel
+from .prompts import PROJECTLESS_SYSTEM_PROMPT, SYSTEM_PROMPT
 from .safety import RiskLevel
 from .session_store import SessionStore
 from .tools import ToolRegistry
@@ -72,12 +73,13 @@ class ChatEntry:
 @dataclass(slots=True)
 class TaskSession:
     id: str
-    project_id: str
+    project_id: str | None
     title: str
     agent: CodingAgent
     cancel_event: threading.Event
     entries: list[ChatEntry] = field(default_factory=list)
     running: bool = False
+    title_is_custom: bool = False
 
 
 @dataclass(slots=True)
@@ -260,12 +262,10 @@ class CodingAgentApp:
         self._configure_window()
         self._build_layout()
         self._load_sessions()
-        if not self.projects:
-            self._add_project(self.config.workspace)
-        elif self.tasks:
+        if not self.tasks:
+            self.new_task()
+        elif self.current_id is None:
             self.current_id = self.tasks[0].id
-        else:
-            self.new_task(self.projects[0].id)
         self._refresh_task_tree()
         self._render_current()
         self.root.after(80, self._poll_events)
@@ -546,7 +546,7 @@ class CodingAgentApp:
         self.transcript.tag_configure("empty_body", foreground=MUTED, font=(UI_FONT, 10), justify="center", spacing3=5)
         self.transcript.tag_configure("empty_hint", foreground=ACCENT, font=(UI_FONT, 10), justify="center", spacing1=8, spacing3=4)
 
-    def _make_agent(self, task_id: str, cancel_event: threading.Event, workspace: Path) -> CodingAgent:
+    def _make_agent(self, task_id: str, cancel_event: threading.Event, workspace: Path | None) -> CodingAgent:
         model = OpenAIChatModel(
             api_key=self.config.api_key,
             model=self.config.model,
@@ -567,6 +567,7 @@ class CodingAgentApp:
             max_steps=self.config.max_steps,
             on_event=lambda name, data: self.events.put(("agent_event", task_id, name, data)),
             is_cancelled=cancel_event.is_set,
+            system_prompt=PROJECTLESS_SYSTEM_PROMPT if workspace is None else SYSTEM_PROMPT,
         )
 
     def choose_project(self) -> None:
@@ -577,37 +578,23 @@ class CodingAgentApp:
             self._add_project(Path(selected))
 
     def _add_project(self, path: Path) -> ProjectSession:
-        resolved = path.expanduser().resolve()
-        existing = next((project for project in self.projects if project.path == resolved), None)
-        if existing:
-            tasks = [task for task in self.tasks if task.project_id == existing.id]
-            if tasks:
-                self.current_id = tasks[0].id
-            else:
-                self.new_task(existing.id)
-            self._refresh_task_tree()
-            self._render_current()
-            return existing
-        project = ProjectSession(id=uuid.uuid4().hex, path=resolved, title=resolved.name or str(resolved))
-        self.projects.append(project)
-        self.settings.workspace = str(resolved)
-        self.new_task(project.id)
+        project = self._ensure_project(path)
+        project_tasks = [task for task in self.tasks if task.project_id == project.id]
+        if project_tasks:
+            self.current_id = project_tasks[0].id
+        self._refresh_task_tree()
+        self._render_current()
         self._save_sessions()
         return project
 
-    def new_task(self, project_id: str | None = None) -> None:
-        project = self._find_project(project_id) if project_id else self._current_project()
-        if project is None:
-            self.choose_project()
-            return
+    def new_task(self, _project_id: str | None = None) -> None:
         task_id = uuid.uuid4().hex
         cancel_event = threading.Event()
-        project_tasks = [task for task in self.tasks if task.project_id == project.id]
         session = TaskSession(
             id=task_id,
-            project_id=project.id,
-            title=f"新对话 {len(project_tasks) + 1}",
-            agent=self._make_agent(task_id, cancel_event, project.path),
+            project_id=None,
+            title=f"新对话 {len(self.tasks) + 1}",
+            agent=self._make_agent(task_id, cancel_event, None),
             cancel_event=cancel_event,
         )
         self.tasks.append(session)
@@ -616,6 +603,46 @@ class CodingAgentApp:
         self._render_current()
         self._save_sessions()
         self.input_box.focus_set()
+
+    def _retarget_agent(self, session: TaskSession, project: ProjectSession | None) -> None:
+        history = list(session.agent.history)
+        session.agent = self._make_agent(session.id, session.cancel_event, project.path if project else None)
+        session.agent.history = [session.agent.history[0], *history[1:]]
+
+    def _ensure_project(self, path: Path) -> ProjectSession:
+        resolved = path.expanduser().resolve()
+        if not resolved.is_dir():
+            raise ValueError(f"工作目录不存在: {resolved}")
+        existing = next((project for project in self.projects if project.path == resolved), None)
+        if existing:
+            return existing
+        project = ProjectSession(id=uuid.uuid4().hex, path=resolved, title=resolved.name or str(resolved))
+        self.projects.append(project)
+        self.settings.workspace = str(resolved)
+        return project
+
+    def _bind_task_to_path(self, session: TaskSession, path: Path) -> ProjectSession:
+        if session.running:
+            raise RuntimeError("运行中的任务不能更改工作目录")
+        project = self._ensure_project(path)
+        session.project_id = project.id
+        self._retarget_agent(session, project)
+        self._refresh_task_tree()
+        self._render_current()
+        self._save_sessions()
+        return project
+
+    def _remove_project(self, project: ProjectSession) -> None:
+        project_tasks = [task for task in self.tasks if task.project_id == project.id]
+        if any(task.running for task in project_tasks):
+            raise RuntimeError("运行中的任务不能移除工作目录")
+        self.projects = [candidate for candidate in self.projects if candidate.id != project.id]
+        for task in project_tasks:
+            task.project_id = None
+            self._retarget_agent(task, None)
+        self._refresh_task_tree()
+        self._render_current()
+        self._save_sessions()
 
     def delete_task(self) -> None:
         selected = self.task_tree.selection()
@@ -631,18 +658,10 @@ class CodingAgentApp:
                 messagebox.showwarning("项目运行中", "请先停止该项目中运行的对话。", parent=self.root)
                 return
             if not messagebox.askyesno(
-                "移除项目", f"从侧栏移除“{project.title}”及其本地对话记录吗？\n不会删除项目目录中的文件。", parent=self.root
+                "移除项目", f"从侧栏移除“{project.title}”吗？\n关联对话会保留，但不再有工作目录。", parent=self.root
             ):
                 return
-            removed_ids = {task.id for task in project_tasks}
-            self.tasks = [task for task in self.tasks if task.id not in removed_ids]
-            self.projects = [candidate for candidate in self.projects if candidate.id != project.id]
-            self.current_id = self.tasks[0].id if self.tasks else None
-            if not self.projects:
-                self._add_project(self.config.workspace)
-            self._refresh_task_tree()
-            self._render_current()
-            self._save_sessions()
+            self._remove_project(project)
             return
         session = self._current()
         if session is None:
@@ -669,7 +688,7 @@ class CodingAgentApp:
         if session is None or not text or session.running:
             return
         self.input_box.delete("1.0", "end")
-        if session.title.startswith("新对话"):
+        if not session.title_is_custom and not session.entries:
             session.title = text.replace("\n", " ")[:32]
         session.entries.append(ChatEntry("user", text))
         session.running = True
@@ -813,6 +832,10 @@ class CodingAgentApp:
                 marker = "●  " if task.running else "·  "
                 tags = ("running",) if task.running else ("task",)
                 self.task_tree.insert(project_item, "end", iid=f"task:{task.id}", text=marker + task.title, tags=tags)
+        for task in (candidate for candidate in self.tasks if candidate.project_id is None):
+            marker = "●  " if task.running else "·  "
+            tags = ("running",) if task.running else ("task",)
+            self.task_tree.insert("", "end", iid=f"task:{task.id}", text=marker + task.title, tags=tags)
         if self.current_id and self.task_tree.exists(f"task:{self.current_id}"):
             self.task_tree.selection_set(f"task:{self.current_id}")
             self.task_tree.see(f"task:{self.current_id}")
@@ -872,12 +895,8 @@ class CodingAgentApp:
         except OSError as exc:
             messagebox.showwarning("保存失败", f"本地设置无法保存：{exc}", parent=self.root)
         for session in self.tasks:
-            history = list(session.agent.history)
             project = self._find_project(session.project_id)
-            if project is None:
-                continue
-            session.agent = self._make_agent(session.id, session.cancel_event, project.path)
-            session.agent.history = history
+            self._retarget_agent(session, project)
         self.status_label.configure(text="设置已更新", fg=SUCCESS)
         self._save_sessions()
 
@@ -901,6 +920,7 @@ class CodingAgentApp:
 
     def _load_sessions(self) -> None:
         state = self.store.load()
+        projects_by_id: dict[str, ProjectSession] = {}
         for raw_project in state.get("projects", []):
             if not isinstance(raw_project, dict):
                 continue
@@ -917,55 +937,63 @@ class CodingAgentApp:
                 title=str(raw_project.get("title") or path.name or path),
             )
             self.projects.append(project)
-            raw_tasks = raw_project.get("tasks", [])
-            if not isinstance(raw_tasks, list):
+            projects_by_id[project.id] = project
+
+        for raw_task in state.get("tasks", []):
+            if not isinstance(raw_task, dict):
                 continue
-            for raw_task in raw_tasks:
-                if not isinstance(raw_task, dict):
-                    continue
-                task_id = str(raw_task.get("id") or uuid.uuid4().hex)
-                cancel_event = threading.Event()
-                agent = self._make_agent(task_id, cancel_event, path)
-                history = raw_task.get("history")
-                if isinstance(history, list) and history and all(isinstance(message, dict) for message in history):
-                    agent.history = history
-                raw_entries = raw_task.get("entries", [])
-                entries = [
-                    ChatEntry(str(entry.get("kind", "system")), str(entry.get("text", "")))
-                    for entry in raw_entries
-                    if isinstance(entry, dict)
-                ] if isinstance(raw_entries, list) else []
-                self.tasks.append(
-                    TaskSession(
-                        id=task_id,
-                        project_id=project_id,
-                        title=str(raw_task.get("title") or "新对话"),
-                        agent=agent,
-                        cancel_event=cancel_event,
-                        entries=entries,
-                    )
+            task_id = str(raw_task.get("id") or uuid.uuid4().hex)
+            raw_project_id = raw_task.get("project_id")
+            project = projects_by_id.get(raw_project_id) if isinstance(raw_project_id, str) else None
+            cancel_event = threading.Event()
+            agent = self._make_agent(task_id, cancel_event, project.path if project else None)
+            history = raw_task.get("history")
+            if isinstance(history, list) and history and all(isinstance(message, dict) for message in history):
+                agent.history = [agent.history[0], *history[1:]]
+            raw_entries = raw_task.get("entries", [])
+            entries = [
+                ChatEntry(str(entry.get("kind", "system")), str(entry.get("text", "")))
+                for entry in raw_entries
+                if isinstance(entry, dict)
+            ] if isinstance(raw_entries, list) else []
+            self.tasks.append(
+                TaskSession(
+                    id=task_id,
+                    project_id=project.id if project else None,
+                    title=str(raw_task.get("title") or "新对话"),
+                    agent=agent,
+                    cancel_event=cancel_event,
+                    entries=entries,
+                    title_is_custom=bool(raw_task.get("title_is_custom", False)),
                 )
+            )
+
+        current_id = state.get("current_id")
+        if isinstance(current_id, str) and self._find_task(current_id):
+            self.current_id = current_id
 
     def _save_sessions(self) -> None:
         payload = {
-            "version": 1,
+            "version": 2,
+            "current_id": self.current_id,
             "projects": [
                 {
                     "id": project.id,
                     "title": project.title,
                     "path": str(project.path),
-                    "tasks": [
-                        {
-                            "id": task.id,
-                            "title": task.title,
-                            "entries": [{"kind": entry.kind, "text": entry.text} for entry in task.entries],
-                            "history": task.agent.history,
-                        }
-                        for task in self.tasks
-                        if task.project_id == project.id
-                    ],
                 }
                 for project in self.projects
+            ],
+            "tasks": [
+                {
+                    "id": task.id,
+                    "project_id": task.project_id,
+                    "title": task.title,
+                    "title_is_custom": task.title_is_custom,
+                    "entries": [{"kind": entry.kind, "text": entry.text} for entry in task.entries],
+                    "history": task.agent.history,
+                }
+                for task in self.tasks
             ],
         }
         try:
