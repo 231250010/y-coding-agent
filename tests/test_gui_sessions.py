@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from coding_agent import gui
+from coding_agent.changes import ConversationChangeTracker
 from coding_agent.gui import CodingAgentApp, ProjectSession, TaskSession, normalize_display_name
 
 
@@ -92,7 +93,7 @@ def make_logic_only_app() -> CodingAgentApp:
     app.closing = False
     app.input_box = SimpleNamespace(focus_set=lambda: None)
     app.task_tree = SimpleNamespace(selection=lambda: ())
-    app._make_agent = lambda _task_id, _cancel_event, workspace: FakeAgent(workspace)
+    app._make_agent = lambda _task_id, _cancel_event, workspace, _tracker=None: FakeAgent(workspace)
     app._refresh_task_tree = lambda: None
     app._render_current = lambda: None
     app._save_sessions = lambda: None
@@ -275,31 +276,67 @@ def test_load_skips_blank_project_paths_and_keeps_referenced_tasks_projectless(r
     assert app.tasks[0].agent.workspace is None
 
 
-def test_saves_version_two_projects_and_tasks_separately(tmp_path: Path) -> None:
+def test_saves_version_three_with_conversation_changes(tmp_path: Path) -> None:
     app, project, task = make_app_with_bound_task()
+    project.path = tmp_path
+    task.change_tracker.retarget(tmp_path)
     saved: list[dict[str, object]] = []
     app.store = SimpleNamespace(save=saved.append)
     task.title_is_custom = True
+    capture = task.change_tracker.capture_paths(["a.txt"])
+    (project.path / "a.txt").write_text("changed\n", encoding="utf-8")
+    task.change_tracker.finish(capture)
+    task.entries.append(gui.ChatEntry("tool", "changed", ("a.txt",)))
+    task.review_path = "a.txt"
 
     CodingAgentApp._save_sessions(app)
 
-    assert saved == [
-        {
-            "version": 2,
-            "current_id": task.id,
-            "projects": [{"id": project.id, "title": "Demo", "path": str(project.path)}],
-            "tasks": [
-                {
-                    "id": task.id,
-                    "project_id": project.id,
-                    "title": "Chat",
-                    "title_is_custom": True,
-                    "entries": [],
-                    "history": task.agent.history,
-                }
-            ],
-        }
-    ]
+    payload = saved[0]
+    assert payload["version"] == 3
+    assert payload["tasks"][0]["file_changes"] == task.change_tracker.serialize()
+    assert payload["tasks"][0]["entries"][0]["change_paths"] == ["a.txt"]
+    assert payload["tasks"][0]["review_path"] == "a.txt"
+
+
+def test_tool_end_adds_clickable_change_paths_to_entry(tmp_path: Path) -> None:
+    app, _project, task = make_app_with_bound_task()
+    task.change_tracker = ConversationChangeTracker(tmp_path)
+    app._set_status = lambda *_args: None
+    app._render_transcript = lambda *_args: None
+    app._save_sessions = lambda: None
+    data = {
+        "name": "write_file",
+        "ok": True,
+        "output": "ok",
+        "error": None,
+        "changes": {"paths": ["a.txt"], "warning": None, "files": []},
+    }
+
+    app._handle_agent_event(task.id, "tool_end", data)
+
+    assert task.entries[-1].change_paths == ("a.txt",)
+
+
+def test_open_change_only_reads_current_task(tmp_path: Path) -> None:
+    app, first, second = make_app_with_two_tasks()
+    first.change_tracker = ConversationChangeTracker(tmp_path)
+    first_capture = first.change_tracker.capture_paths(["first.py"])
+    (tmp_path / "first.py").write_text("first\n", encoding="utf-8")
+    first.change_tracker.finish(first_capture)
+    second.change_tracker = ConversationChangeTracker(tmp_path)
+    second_capture = second.change_tracker.capture_paths(["second.py"])
+    (tmp_path / "second.py").write_text("second\n", encoding="utf-8")
+    second.change_tracker.finish(second_capture)
+    shown: list[str] = []
+    app.review_pane = SimpleNamespace(show_change=lambda change: shown.append(change.path))
+    app._show_review_container = lambda: None
+
+    app.current_id = first.id
+    app._open_change("first.py")
+
+    assert shown == ["first.py"]
+    assert first.review_path == "first.py"
+    assert second.review_path is None
 
 
 def test_first_message_does_not_replace_a_custom_title(monkeypatch) -> None:

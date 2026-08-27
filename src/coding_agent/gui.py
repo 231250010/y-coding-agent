@@ -11,8 +11,10 @@ from tkinter import filedialog, font as tkfont, messagebox, ttk
 from typing import Any, Sequence
 
 from .agent import AgentCancelled, AgentStopped, CodingAgent
+from .changes import ConversationChangeTracker
 from .config import Config, ConfigError
 from .context import ContextManager
+from .diff_view import DiffPalette, DiffReviewPane, FileChangeCard
 from .local_settings import LocalSettings
 from .model import ModelError, OpenAIChatModel
 from .prompts import PROJECTLESS_SYSTEM_PROMPT, SYSTEM_PROMPT
@@ -50,6 +52,20 @@ TOOL_STATUS = WARNING
 UI_FONT = "Microsoft YaHei UI"
 DISPLAY_FONT = "Microsoft YaHei UI"
 MONO_FONT = "Cascadia Mono"
+DIFF_PALETTE = DiffPalette(
+    surface=SURFACE,
+    canvas=CANVAS,
+    border=BORDER,
+    text=TEXT,
+    muted=MUTED,
+    accent=SIGNATURE,
+    added_bg=DIFF_ADDED_BG,
+    added_fg=DIFF_ADDED_FG,
+    removed_bg=DIFF_REMOVED_BG,
+    removed_fg=DIFF_REMOVED_FG,
+    ui_font=UI_FONT,
+    mono_font=MONO_FONT,
+)
 APP_NAME = "小码"
 ASSISTANT_LABEL = APP_NAME
 COMPOSER_LINES = 3
@@ -89,6 +105,7 @@ def normalize_display_name(value: str) -> str:
 class ChatEntry:
     kind: str
     text: str
+    change_paths: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -98,9 +115,13 @@ class TaskSession:
     title: str
     agent: CodingAgent
     cancel_event: threading.Event
+    change_tracker: ConversationChangeTracker = field(
+        default_factory=lambda: ConversationChangeTracker(None)
+    )
     entries: list[ChatEntry] = field(default_factory=list)
     running: bool = False
     title_is_custom: bool = False
+    review_path: str | None = None
 
 
 @dataclass(slots=True)
@@ -580,7 +601,19 @@ class CodingAgentApp:
         )
         self.stop_button.pack(side="right")
 
-        transcript_outer = tk.Frame(content, bg=CANVAS, padx=38)
+        self.content_split = tk.PanedWindow(
+            content,
+            orient="horizontal",
+            bg=BORDER,
+            sashwidth=5,
+            sashrelief="flat",
+            bd=0,
+        )
+        self.content_split.pack(fill="both", expand=True)
+        chat_content = tk.Frame(self.content_split, bg=CANVAS)
+        self.content_split.add(chat_content, minsize=460, stretch="always")
+
+        transcript_outer = tk.Frame(chat_content, bg=CANVAS, padx=38)
         transcript_outer.pack(fill="both", expand=True)
         transcript_frame = tk.Frame(transcript_outer, bg=SURFACE, highlightthickness=1, highlightbackground=BORDER)
         transcript_frame.pack(fill="both", expand=True)
@@ -603,8 +636,9 @@ class CodingAgentApp:
         self.transcript.pack(fill="both", expand=True)
         scrollbar.configure(command=self.transcript.yview)
         self._configure_transcript_tags()
+        self._change_cards: list[FileChangeCard] = []
 
-        composer = tk.Frame(content, bg=CANVAS, padx=38, pady=14)
+        composer = tk.Frame(chat_content, bg=CANVAS, padx=38, pady=14)
         _pack_composer(composer, transcript_outer)
         self.input_border = tk.Frame(composer, bg=BORDER, padx=1, pady=1)
         self.input_border.pack(fill="x")
@@ -674,6 +708,15 @@ class CodingAgentApp:
         )
         _pack_composer_actions(self.composer_menu_button, self.workspace_label, shortcut_label, self.send_button)
 
+        self.review_container = tk.Frame(
+            self.content_split,
+            bg=SURFACE,
+            highlightthickness=1,
+            highlightbackground=BORDER,
+        )
+        self.review_pane = DiffReviewPane(self.review_container, DIFF_PALETTE, self._close_review)
+        self.review_pane.pack(fill="both", expand=True)
+
     @staticmethod
     def _sidebar_button(parent: tk.Misc, text: str, command: Any, *, primary: bool = False) -> tk.Button:
         return tk.Button(
@@ -704,7 +747,13 @@ class CodingAgentApp:
         self.transcript.tag_configure("empty_body", foreground=MUTED, font=(UI_FONT, 10), justify="center", spacing3=5)
         self.transcript.tag_configure("empty_hint", foreground=ACCENT, font=(UI_FONT, 10), justify="center", spacing1=8, spacing3=4)
 
-    def _make_agent(self, task_id: str, cancel_event: threading.Event, workspace: Path | None) -> CodingAgent:
+    def _make_agent(
+        self,
+        task_id: str,
+        cancel_event: threading.Event,
+        workspace: Path | None,
+        change_tracker: ConversationChangeTracker,
+    ) -> CodingAgent:
         model = OpenAIChatModel(
             api_key=self.config.api_key,
             model=self.config.model,
@@ -717,6 +766,7 @@ class CodingAgentApp:
             approver=lambda command, risk, reason: self._request_approval(task_id, command, risk, reason),
             is_cancelled=cancel_event.is_set,
             approval_mode=self.config.approval_mode,
+            change_tracker=change_tracker,
         )
         return CodingAgent(
             model,
@@ -765,12 +815,14 @@ class CodingAgentApp:
     def new_task(self, _project_id: str | None = None) -> None:
         task_id = uuid.uuid4().hex
         cancel_event = threading.Event()
+        change_tracker = ConversationChangeTracker(None)
         session = TaskSession(
             id=task_id,
             project_id=None,
             title=f"新对话 {len(self.tasks) + 1}",
-            agent=self._make_agent(task_id, cancel_event, None),
+            agent=self._make_agent(task_id, cancel_event, None, change_tracker),
             cancel_event=cancel_event,
+            change_tracker=change_tracker,
         )
         self.tasks.append(session)
         self.current_id = task_id
@@ -781,7 +833,14 @@ class CodingAgentApp:
 
     def _retarget_agent(self, session: TaskSession, project: ProjectSession | None) -> None:
         history = list(session.agent.history)
-        session.agent = self._make_agent(session.id, session.cancel_event, project.path if project else None)
+        workspace = project.path if project else None
+        session.change_tracker.retarget(workspace)
+        session.agent = self._make_agent(
+            session.id,
+            session.cancel_event,
+            workspace,
+            session.change_tracker,
+        )
         session.agent.history = [session.agent.history[0], *history[1:]]
 
     def _ensure_project(self, path: Path) -> ProjectSession:
@@ -989,7 +1048,20 @@ class CodingAgentApp:
             tone = SUCCESS if data["ok"] else ERROR
             detail = data.get("error") or data.get("output") or ""
             marker = "✓" if data["ok"] else "✗"
-            session.entries.append(ChatEntry("tool" if data["ok"] else "error", f"{marker} {data['name']}\n{detail[:2000]}"))
+            change_data = data.get("changes")
+            change_paths = tuple(
+                path
+                for path in change_data.get("paths", [])
+                if isinstance(path, str)
+            ) if isinstance(change_data, dict) else ()
+            tracking_warning = change_data.get("warning") if isinstance(change_data, dict) else None
+            rendered = f"{marker} {data['name']}\n{detail[:2000]}"
+            if isinstance(tracking_warning, str) and tracking_warning:
+                rendered += f"\n⚠ {tracking_warning}"
+            session.entries.append(
+                ChatEntry("tool" if data["ok"] else "error", rendered, change_paths)
+            )
+            self._save_sessions()
         else:
             return
         if task_id == self.current_id:
@@ -1210,8 +1282,60 @@ class CodingAgentApp:
             self.project_menu_button.pack_forget()
             self.workspace_label.configure(text="尚未选择工作目录")
         self._render_transcript(session)
+        self._sync_review_pane(session)
+
+    def _show_review_container(self) -> None:
+        if not hasattr(self, "content_split") or not hasattr(self, "review_container"):
+            return
+        panes = {str(pane) for pane in self.content_split.panes()}
+        if str(self.review_container) not in panes:
+            self.content_split.add(self.review_container, minsize=320, width=480, stretch="always")
+
+    def _hide_review_container(self) -> None:
+        if not hasattr(self, "content_split") or not hasattr(self, "review_container"):
+            return
+        panes = {str(pane) for pane in self.content_split.panes()}
+        if str(self.review_container) in panes:
+            self.content_split.forget(self.review_container)
+
+    def _open_change(self, path: str) -> None:
+        session = self._current()
+        if session is None:
+            return
+        change = session.change_tracker.changes.get(path)
+        if change is None:
+            return
+        session.review_path = path
+        self.review_pane.show_change(change)
+        self._show_review_container()
+        self._save_sessions()
+
+    def _close_review(self) -> None:
+        session = self._current()
+        if session is not None:
+            session.review_path = None
+        if hasattr(self, "review_pane"):
+            self.review_pane.clear()
+        self._hide_review_container()
+        self._save_sessions()
+
+    def _sync_review_pane(self, session: TaskSession) -> None:
+        if not hasattr(self, "review_pane"):
+            return
+        change = session.change_tracker.changes.get(session.review_path or "")
+        if change is None:
+            if session.review_path is not None:
+                session.review_path = None
+            self.review_pane.clear()
+            self._hide_review_container()
+            return
+        self.review_pane.show_change(change)
+        self._show_review_container()
 
     def _render_transcript(self, session: TaskSession) -> None:
+        for card in getattr(self, "_change_cards", []):
+            card.destroy()
+        self._change_cards = []
         self.transcript.configure(state="normal")
         self.transcript.delete("1.0", "end")
         if not session.entries:
@@ -1232,6 +1356,19 @@ class CodingAgentApp:
                 self.transcript.insert("end", entry.text + "\n", "assistant")
             else:
                 self.transcript.insert("end", entry.text + "\n", entry.kind)
+            for path in entry.change_paths:
+                change = session.change_tracker.changes.get(path)
+                if change is None:
+                    continue
+                card = FileChangeCard(
+                    self.transcript,
+                    change,
+                    lambda selected=path: self._open_change(selected),
+                    DIFF_PALETTE,
+                )
+                self._change_cards.append(card)
+                self.transcript.window_create("end", window=card, padx=16, pady=4, stretch=True)
+                self.transcript.insert("end", "\n")
         self.transcript.configure(state="disabled")
         self.transcript.see("end")
 
@@ -1307,16 +1444,37 @@ class CodingAgentApp:
             raw_project_id = raw_task.get("project_id")
             project = projects_by_id.get(raw_project_id) if isinstance(raw_project_id, str) else None
             cancel_event = threading.Event()
-            agent = self._make_agent(task_id, cancel_event, project.path if project else None)
+            change_tracker = ConversationChangeTracker(project.path if project else None)
+            change_tracker.load_serialized(raw_task.get("file_changes", []))
+            agent = self._make_agent(
+                task_id,
+                cancel_event,
+                project.path if project else None,
+                change_tracker,
+            )
             history = raw_task.get("history")
             if isinstance(history, list) and history and all(isinstance(message, dict) for message in history):
                 agent.history = [agent.history[0], *history[1:]]
             raw_entries = raw_task.get("entries", [])
             entries = [
-                ChatEntry(str(entry.get("kind", "system")), str(entry.get("text", "")))
+                ChatEntry(
+                    str(entry.get("kind", "system")),
+                    str(entry.get("text", "")),
+                    tuple(
+                        path
+                        for path in entry.get("change_paths", [])
+                        if isinstance(path, str)
+                    ) if isinstance(entry.get("change_paths", []), list) else (),
+                )
                 for entry in raw_entries
                 if isinstance(entry, dict)
             ] if isinstance(raw_entries, list) else []
+            raw_review_path = raw_task.get("review_path")
+            review_path = (
+                raw_review_path
+                if isinstance(raw_review_path, str) and raw_review_path in change_tracker.changes
+                else None
+            )
             self.tasks.append(
                 TaskSession(
                     id=task_id,
@@ -1324,8 +1482,10 @@ class CodingAgentApp:
                     title=str(raw_task.get("title") or "新对话"),
                     agent=agent,
                     cancel_event=cancel_event,
+                    change_tracker=change_tracker,
                     entries=entries,
                     title_is_custom=bool(raw_task.get("title_is_custom", False)),
+                    review_path=review_path,
                 )
             )
 
@@ -1335,7 +1495,7 @@ class CodingAgentApp:
 
     def _save_sessions(self) -> None:
         payload = {
-            "version": 2,
+            "version": 3,
             "current_id": self.current_id,
             "projects": [
                 {
@@ -1351,8 +1511,17 @@ class CodingAgentApp:
                     "project_id": task.project_id,
                     "title": task.title,
                     "title_is_custom": task.title_is_custom,
-                    "entries": [{"kind": entry.kind, "text": entry.text} for entry in task.entries],
+                    "entries": [
+                        {
+                            "kind": entry.kind,
+                            "text": entry.text,
+                            "change_paths": list(entry.change_paths),
+                        }
+                        for entry in task.entries
+                    ],
                     "history": task.agent.history,
+                    "file_changes": task.change_tracker.serialize(),
+                    "review_path": task.review_path,
                 }
                 for task in self.tasks
             ],
