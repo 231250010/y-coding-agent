@@ -373,12 +373,15 @@ def test_composer_menu_uses_projectless_workspace_label(monkeypatch) -> None:
     monkeypatch.setattr(gui.tk, "Menu", RecordingMenu)
 
     app._show_composer_menu()
+    app._show_composer_menu()
 
-    assert len(created) == 1
+    assert len(created) == 2
     assert created[0].commands[0]["label"] == "选择工作目录…"
     assert created[0].popup == (20, 40)
     assert created[0].released is True
     assert created[0].destroyed is True
+    assert created[1].destroyed is False
+    assert app._active_menu is created[1]
 
 
 def test_projectless_rendering_labels_workspace_and_empty_state() -> None:
@@ -442,9 +445,14 @@ def test_project_removal_uses_target_not_selected_project(monkeypatch) -> None:
     assert second_task.project_id is None
 
 
-def test_item_menu_destroys_transient_menu_after_it_unposts(monkeypatch) -> None:
+def test_item_menu_remains_active_until_the_composer_menu_replaces_it(monkeypatch) -> None:
     app, task = make_app_with_projectless_task()
     app.root = object()
+    app.composer_menu_button = SimpleNamespace(
+        winfo_rootx=lambda: 40,
+        winfo_rooty=lambda: 50,
+        winfo_height=lambda: 10,
+    )
     created: list[object] = []
 
     class RecordingMenu:
@@ -471,7 +479,10 @@ def test_item_menu_destroys_transient_menu_after_it_unposts(monkeypatch) -> None
     monkeypatch.setattr(gui.tk, "Menu", RecordingMenu)
 
     app._show_item_menu(f"task:{task.id}", 20, 30)
+    app._show_composer_menu()
 
-    assert len(created) == 1
+    assert len(created) == 2
     assert created[0].released is True
     assert created[0].destroyed is True
+    assert created[1].destroyed is False
+    assert app._active_menu is created[1]

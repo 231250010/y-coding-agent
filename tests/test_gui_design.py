@@ -53,3 +53,28 @@ def test_composer_reserves_space_at_the_bottom_of_small_windows() -> None:
     gui._pack_composer(composer, transcript)
 
     assert composer.options == {"fill": "x", "side": "bottom", "before": transcript}
+
+
+def test_composer_actions_reserve_right_controls_before_workspace_path() -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class PackRecorder:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def pack(self, **options: object) -> None:
+            calls.append((self.name, options))
+
+    gui._pack_composer_actions(
+        PackRecorder("menu"),
+        PackRecorder("workspace"),
+        PackRecorder("shortcut"),
+        PackRecorder("send"),
+    )
+
+    assert calls == [
+        ("send", {"side": "right"}),
+        ("shortcut", {"side": "right", "padx": (0, 12)}),
+        ("menu", {"side": "left", "padx": (0, 6)}),
+        ("workspace", {"side": "left", "fill": "x", "expand": True}),
+    ]

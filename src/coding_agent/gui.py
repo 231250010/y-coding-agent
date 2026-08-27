@@ -64,6 +64,18 @@ def _pack_composer(composer: tk.Misc, transcript: tk.Misc) -> None:
     composer.pack(fill="x", side="bottom", before=transcript)
 
 
+def _pack_composer_actions(
+    menu_button: tk.Misc,
+    workspace_label: tk.Misc,
+    shortcut_label: tk.Misc,
+    send_button: tk.Misc,
+) -> None:
+    send_button.pack(side="right")
+    shortcut_label.pack(side="right", padx=(0, 12))
+    menu_button.pack(side="left", padx=(0, 6))
+    workspace_label.pack(side="left", fill="x", expand=True)
+
+
 def normalize_display_name(value: str) -> str:
     return " ".join(value.replace("\n", " ").split())[:80]
 
@@ -346,6 +358,7 @@ class CodingAgentApp:
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.closing = False
         self._hover_item: str | None = None
+        self._active_menu: tk.Menu | None = None
 
         self._configure_window()
         self._build_layout()
@@ -626,7 +639,6 @@ class CodingAgentApp:
             pady=0,
             font=(UI_FONT, 11, "bold"),
         )
-        self.composer_menu_button.pack(side="left", padx=(0, 6))
         self.workspace_label = tk.Label(
             composer_actions,
             text=str(self.config.workspace),
@@ -634,14 +646,13 @@ class CodingAgentApp:
             fg=MUTED,
             font=(MONO_FONT, 9),
         )
-        self.workspace_label.pack(side="left")
-        tk.Label(
+        shortcut_label = tk.Label(
             composer_actions,
             text="Ctrl + Enter 开始",
             bg=SURFACE,
             fg=MUTED,
             font=(UI_FONT, 9),
-        ).pack(side="right", padx=(0, 12))
+        )
         self.send_button = tk.Button(
             composer_actions,
             text="开始工作  →",
@@ -655,7 +666,7 @@ class CodingAgentApp:
             padx=18,
             pady=8,
         )
-        self.send_button.pack(side="right")
+        _pack_composer_actions(self.composer_menu_button, self.workspace_label, shortcut_label, self.send_button)
 
     @staticmethod
     def _sidebar_button(parent: tk.Misc, text: str, command: Any, *, primary: bool = False) -> tk.Button:
@@ -1049,13 +1060,17 @@ class CodingAgentApp:
             label="移除项目" if isinstance(target, ProjectSession) else "删除对话",
             command=lambda target_id=item_id: self.delete_task(target_id),
         )
+        self._post_transient_menu(menu, x_root, y_root)
+
+    def _post_transient_menu(self, menu: tk.Menu, x_root: int, y_root: int) -> None:
+        active_menu = getattr(self, "_active_menu", None)
+        if active_menu is not None:
+            active_menu.destroy()
+        self._active_menu = menu
         try:
             menu.tk_popup(x_root, y_root)
         finally:
-            try:
-                menu.grab_release()
-            finally:
-                menu.destroy()
+            menu.grab_release()
 
     def _show_current_project_menu(self) -> None:
         project = self._current_project()
@@ -1086,16 +1101,11 @@ class CodingAgentApp:
             label="更换工作目录…" if self._find_project(session.project_id) else "选择工作目录…",
             command=self.choose_workspace_for_current,
         )
-        try:
-            menu.tk_popup(
-                self.composer_menu_button.winfo_rootx(),
-                self.composer_menu_button.winfo_rooty() + self.composer_menu_button.winfo_height(),
-            )
-        finally:
-            try:
-                menu.grab_release()
-            finally:
-                menu.destroy()
+        self._post_transient_menu(
+            menu,
+            self.composer_menu_button.winfo_rootx(),
+            self.composer_menu_button.winfo_rooty() + self.composer_menu_button.winfo_height(),
+        )
 
     def _show_tree_actions(self, event: tk.Event[Any]) -> str | None:
         item_id = self.task_tree.identify_row(event.y)
