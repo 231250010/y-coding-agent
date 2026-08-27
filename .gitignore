@@ -12,3 +12,4 @@ venv/
 .coding-agent/
 build/
 dist/
+.worktrees/
