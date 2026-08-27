@@ -5,8 +5,10 @@ import threading
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from coding_agent import gui
-from coding_agent.gui import CodingAgentApp, ProjectSession, TaskSession
+from coding_agent.gui import CodingAgentApp, ProjectSession, TaskSession, normalize_display_name
 
 
 class FakeAgent:
@@ -68,6 +70,19 @@ def make_app_with_projectless_task() -> tuple[CodingAgentApp, TaskSession]:
     app.tasks.append(task)
     app.current_id = task.id
     return app, task
+
+
+def make_app_with_two_tasks() -> tuple[CodingAgentApp, TaskSession, TaskSession]:
+    app, first = make_app_with_projectless_task()
+    second = TaskSession(
+        id="task-2",
+        project_id=None,
+        title="Second",
+        agent=FakeAgent(None),
+        cancel_event=threading.Event(),
+    )
+    app.tasks.append(second)
+    return app, first, second
 
 
 def make_app_with_bound_task() -> tuple[CodingAgentApp, ProjectSession, TaskSession]:
@@ -195,3 +210,19 @@ def test_first_message_does_not_replace_a_custom_title(monkeypatch) -> None:
     CodingAgentApp.send_message(app)
 
     assert task.title == "新对话 自定义名称"
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("  新名字  ", "新名字"), ("a\nb", "a b"), ("   ", "")])
+def test_normalize_display_name(raw: str, expected: str) -> None:
+    assert normalize_display_name(raw) == expected
+
+
+def test_rename_uses_menu_target_not_current_task() -> None:
+    app, first, second = make_app_with_two_tasks()
+    app.current_id = first.id
+
+    assert app._rename_tree_item(f"task:{second.id}", "Second renamed") is True
+
+    assert first.title != "Second renamed"
+    assert second.title == "Second renamed"
+    assert second.title_is_custom is True

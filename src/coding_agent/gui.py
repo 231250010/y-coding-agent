@@ -64,6 +64,10 @@ def _pack_composer(composer: tk.Misc, transcript: tk.Misc) -> None:
     composer.pack(fill="x", side="bottom", before=transcript)
 
 
+def normalize_display_name(value: str) -> str:
+    return " ".join(value.replace("\n", " ").split())[:80]
+
+
 @dataclass(slots=True)
 class ChatEntry:
     kind: str
@@ -246,6 +250,89 @@ class ConfigDialog(tk.Toplevel):
         self.destroy()
 
 
+class RenameDialog(tk.Toplevel):
+    def __init__(self, parent: tk.Misc, title: str, label: str, initial: str) -> None:
+        super().__init__(parent)
+        self.title(title)
+        self.configure(bg=CANVAS)
+        self.resizable(False, False)
+        self.transient(parent)
+        self.result: str | None = None
+        self.value = tk.StringVar(value=initial)
+
+        body = tk.Frame(self, bg=CANVAS, padx=28, pady=24)
+        body.pack(fill="both", expand=True)
+        tk.Label(body, text=title, bg=CANVAS, fg=TEXT, font=(DISPLAY_FONT, 17)).pack(anchor="w")
+        tk.Label(body, text=label, bg=CANVAS, fg=MUTED, font=(UI_FONT, 10)).pack(anchor="w", pady=(12, 5))
+        self.entry = tk.Entry(
+            body,
+            textvariable=self.value,
+            width=42,
+            bg=SURFACE,
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=BORDER,
+            highlightcolor=ACCENT,
+            font=(UI_FONT, 10),
+        )
+        self.entry.pack(fill="x", ipady=7)
+        self.error_label = tk.Label(body, text="", bg=CANVAS, fg=ERROR, font=(UI_FONT, 9))
+        self.error_label.pack(anchor="w", pady=(5, 0))
+        buttons = tk.Frame(body, bg=CANVAS)
+        buttons.pack(anchor="e", pady=(18, 0))
+        tk.Button(
+            buttons,
+            text="取消",
+            command=self._cancel,
+            bg=SURFACE,
+            fg=TEXT,
+            activebackground=BLUSH,
+            activeforeground=TEXT,
+            relief="flat",
+            padx=16,
+            pady=7,
+        ).pack(side="left", padx=(0, 8))
+        tk.Button(
+            buttons,
+            text="保存",
+            command=self._save,
+            bg=ACCENT,
+            fg="white",
+            activebackground=ACCENT_HOVER,
+            activeforeground="white",
+            relief="flat",
+            padx=16,
+            pady=7,
+        ).pack(side="left")
+
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.bind("<Return>", self._save)
+        self.bind("<Escape>", self._cancel)
+        self.grab_set()
+        self.update_idletasks()
+        x = parent.winfo_rootx() + max(0, (parent.winfo_width() - self.winfo_width()) // 2)
+        y = parent.winfo_rooty() + max(0, (parent.winfo_height() - self.winfo_height()) // 2)
+        self.geometry(f"+{x}+{y}")
+        self.entry.focus_set()
+        self.entry.selection_range(0, "end")
+
+    def _save(self, _event: tk.Event[Any] | None = None) -> str:
+        result = normalize_display_name(self.value.get())
+        if not result:
+            self.error_label.configure(text="名称不能为空")
+            self.entry.focus_set()
+            return "break"
+        self.result = result
+        self.destroy()
+        return "break"
+
+    def _cancel(self, _event: tk.Event[Any] | None = None) -> str:
+        self.destroy()
+        return "break"
+
+
 class CodingAgentApp:
     def __init__(self, root: tk.Tk, config: Config, settings: LocalSettings, settings_root: Path) -> None:
         self.root = root
@@ -258,6 +345,7 @@ class CodingAgentApp:
         self.current_id: str | None = None
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.closing = False
+        self._hover_item: str | None = None
 
         self._configure_window()
         self._build_layout()
@@ -387,6 +475,25 @@ class CodingAgentApp:
         self.task_tree.tag_configure("running", foreground="#F5B493", font=(UI_FONT, 10, "bold"))
         self.task_tree.pack(fill="both", expand=True, padx=10, pady=(0, 8))
         self.task_tree.bind("<<TreeviewSelect>>", self._select_task)
+        self.task_tree.bind("<Motion>", self._show_tree_actions)
+        self.task_tree.bind("<Leave>", self._hide_tree_actions)
+        self.task_tree.bind("<Button-3>", self._show_tree_actions)
+        self.tree_actions = tk.Button(
+            sidebar,
+            text="···",
+            bg=SIDEBAR_RAISED,
+            fg=SIDEBAR_TEXT,
+            activebackground="#485174",
+            activeforeground=SIDEBAR_TEXT,
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+            padx=4,
+            pady=0,
+        )
+        self.tree_actions.bind("<Enter>", lambda _event: None)
+        self.tree_actions.bind("<Leave>", self._hide_tree_actions)
+        self.tree_actions.place_forget()
 
         side_footer = tk.Frame(sidebar, bg=SIDEBAR, padx=14, pady=14)
         side_footer.pack(fill="x")
@@ -401,14 +508,30 @@ class CodingAgentApp:
         header.pack(fill="x")
         title_stack = tk.Frame(header, bg=CANVAS)
         title_stack.pack(side="left", fill="x", expand=True)
+        project_row = tk.Frame(title_stack, bg=CANVAS)
+        project_row.pack(anchor="w")
         self.project_label = tk.Label(
-            title_stack,
+            project_row,
             text="",
             bg=CANVAS,
             fg=ACCENT,
             font=(UI_FONT, 9, "bold"),
         )
-        self.project_label.pack(anchor="w")
+        self.project_label.pack(side="left")
+        self.project_menu_button = tk.Button(
+            project_row,
+            text="···",
+            command=self._show_current_project_menu,
+            bg=CANVAS,
+            fg=ACCENT,
+            activebackground=BLUSH,
+            activeforeground=ACCENT_HOVER,
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+            padx=5,
+            pady=0,
+        )
         self.title_label = tk.Label(title_stack, text="", bg=CANVAS, fg=TEXT, font=(DISPLAY_FONT, 20))
         self.title_label.pack(anchor="w", pady=(2, 0))
         self.status_label = tk.Label(
@@ -644,13 +767,14 @@ class CodingAgentApp:
         self._render_current()
         self._save_sessions()
 
-    def delete_task(self) -> None:
-        selected = self.task_tree.selection()
-        if not selected:
-            return
-        item = selected[0]
-        if item.startswith("project:"):
-            project = self._find_project(item.removeprefix("project:"))
+    def delete_task(self, item_id: str | None = None) -> None:
+        if item_id is None:
+            selected = self.task_tree.selection()
+            if not selected:
+                return
+            item_id = selected[0]
+        if item_id.startswith("project:"):
+            project = self._find_project(item_id.removeprefix("project:"))
             if project is None:
                 return
             project_tasks = [task for task in self.tasks if task.project_id == project.id]
@@ -663,7 +787,9 @@ class CodingAgentApp:
                 return
             self._remove_project(project)
             return
-        session = self._current()
+        if not item_id.startswith("task:"):
+            return
+        session = self._find_task(item_id.removeprefix("task:"))
         if session is None:
             return
         if session.running:
@@ -672,10 +798,14 @@ class CodingAgentApp:
         if not messagebox.askyesno("删除任务", f"确定删除“{session.title}”吗？", parent=self.root):
             return
         self.tasks = [task for task in self.tasks if task.id != session.id]
+        if session.id != self.current_id:
+            self._refresh_task_tree()
+            self._save_sessions()
+            return
         siblings = [task for task in self.tasks if task.project_id == session.project_id]
         if not siblings:
             self.current_id = None
-            self.new_task(session.project_id)
+            self.new_task()
             return
         self.current_id = siblings[-1].id
         self._refresh_task_tree()
@@ -823,7 +953,118 @@ class CodingAgentApp:
                 self.current_id = project_tasks[0].id
                 self._render_current()
 
+    def _tree_item_target(self, item_id: str) -> TaskSession | ProjectSession | None:
+        if item_id.startswith("task:"):
+            return self._find_task(item_id.removeprefix("task:"))
+        if item_id.startswith("project:"):
+            return self._find_project(item_id.removeprefix("project:"))
+        return None
+
+    def _rename_tree_item(self, item_id: str, name: str) -> bool:
+        target = self._tree_item_target(item_id)
+        normalized = normalize_display_name(name)
+        if target is None or not normalized:
+            return False
+        target.title = normalized
+        if isinstance(target, TaskSession):
+            target.title_is_custom = True
+        self._refresh_task_tree()
+        self._render_current()
+        self._save_sessions()
+        return True
+
+    def _prompt_rename_tree_item(self, item_id: str) -> None:
+        target = self._tree_item_target(item_id)
+        if target is None:
+            return
+        is_project = isinstance(target, ProjectSession)
+        dialog = RenameDialog(
+            self.root,
+            "重命名项目" if is_project else "重命名对话",
+            "项目名称" if is_project else "对话名称",
+            target.title,
+        )
+        self.root.wait_window(dialog)
+        if dialog.result is not None:
+            self._rename_tree_item(item_id, dialog.result)
+
+    def _show_item_menu(self, item_id: str, x_root: int, y_root: int) -> None:
+        target = self._tree_item_target(item_id)
+        if target is None:
+            return
+        menu = tk.Menu(
+            self.root,
+            tearoff=False,
+            bg=SURFACE,
+            fg=TEXT,
+            activebackground=BLUSH,
+            activeforeground=TEXT,
+            relief="flat",
+            bd=0,
+            font=(UI_FONT, 10),
+        )
+        menu.add_command(label="重命名", command=lambda target_id=item_id: self._prompt_rename_tree_item(target_id))
+        menu.add_separator()
+        menu.add_command(
+            label="移除项目" if isinstance(target, ProjectSession) else "删除对话",
+            command=lambda target_id=item_id: self.delete_task(target_id),
+        )
+        try:
+            menu.tk_popup(x_root, y_root)
+        finally:
+            menu.grab_release()
+
+    def _show_current_project_menu(self) -> None:
+        project = self._current_project()
+        if project is None:
+            return
+        self._show_item_menu(
+            f"project:{project.id}",
+            self.project_menu_button.winfo_rootx(),
+            self.project_menu_button.winfo_rooty() + self.project_menu_button.winfo_height(),
+        )
+
+    def _show_tree_actions(self, event: tk.Event[Any]) -> str | None:
+        item_id = self.task_tree.identify_row(event.y)
+        if self._tree_item_target(item_id) is None:
+            self._hide_tree_actions()
+            return None
+        if getattr(event, "num", None) == 3:
+            self._hide_tree_actions()
+            self._show_item_menu(item_id, event.x_root, event.y_root)
+            return "break"
+        bbox = self.task_tree.bbox(item_id)
+        if not bbox:
+            self._hide_tree_actions()
+            return None
+        x, y, width, height = bbox
+        self._hover_item = item_id
+        self.tree_actions.configure(
+            command=lambda target_id=item_id: self._show_item_menu(
+                target_id,
+                self.tree_actions.winfo_rootx(),
+                self.tree_actions.winfo_rooty() + self.tree_actions.winfo_height(),
+            )
+        )
+        self.tree_actions.place(
+            x=self.task_tree.winfo_x() + x + width - 31,
+            y=self.task_tree.winfo_y() + y + 4,
+            width=27,
+            height=max(1, height - 8),
+        )
+        return None
+
+    def _hide_tree_actions(self, event: tk.Event[Any] | None = None) -> None:
+        if event is not None:
+            hovered = self.root.winfo_containing(event.x_root, event.y_root)
+            if hovered in (self.task_tree, self.tree_actions):
+                return
+        self._hover_item = None
+        self.tree_actions.place_forget()
+
     def _refresh_task_tree(self) -> None:
+        if hasattr(self, "tree_actions"):
+            self._hide_tree_actions()
         self.task_tree.delete(*self.task_tree.get_children())
         for project in self.projects:
             project_item = f"project:{project.id}"
@@ -852,7 +1093,13 @@ class CodingAgentApp:
         self.input_box.configure(state="disabled" if session.running else "normal")
         if project:
             self.project_label.configure(text=f"{project.title.upper()}  /  对话")
+            if not self.project_menu_button.winfo_ismapped():
+                self.project_menu_button.pack(side="left", padx=(4, 0))
             self.workspace_label.configure(text=f"工作目录  {project.path}")
+        else:
+            self.project_label.configure(text="")
+            self.project_menu_button.pack_forget()
+            self.workspace_label.configure(text="未绑定工作目录")
         self._render_transcript(session)
 
     def _render_transcript(self, session: TaskSession) -> None:
