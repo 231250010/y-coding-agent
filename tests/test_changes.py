@@ -131,3 +131,29 @@ def test_external_symlink_is_rejected(tmp_path: Path) -> None:
     tracker = ConversationChangeTracker(tmp_path)
     with pytest.raises(ValueError, match="超出工作区"):
         tracker.capture_paths(["link.txt"])
+
+
+def test_workspace_capture_finds_multiple_changes_and_ignores_dependencies(tmp_path: Path) -> None:
+    (tmp_path / "old.txt").write_text("old\n", encoding="utf-8")
+    ignored = tmp_path / "node_modules" / "pkg"
+    ignored.mkdir(parents=True)
+    (ignored / "index.js").write_text("old", encoding="utf-8")
+    tracker = ConversationChangeTracker(tmp_path)
+    capture = tracker.capture_workspace()
+
+    (tmp_path / "old.txt").write_text("new\n", encoding="utf-8")
+    (tmp_path / "made.txt").write_text("made\n", encoding="utf-8")
+    (ignored / "index.js").write_text("new", encoding="utf-8")
+    changes = tracker.finish(capture)
+
+    assert changes.paths == ("made.txt", "old.txt")
+    assert "node_modules/pkg/index.js" not in tracker.changes
+
+
+def test_workspace_capture_reports_total_snapshot_limit(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("a" * 10, encoding="utf-8")
+    (tmp_path / "b.txt").write_text("b" * 10, encoding="utf-8")
+    tracker = ConversationChangeTracker(tmp_path, max_command_bytes=12)
+    capture = tracker.capture_workspace()
+    assert capture.warning is not None
+    assert "预览不完整" in capture.warning

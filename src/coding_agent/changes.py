@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import difflib
 import hashlib
+import os
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Sequence
@@ -9,6 +10,23 @@ from typing import Any, Sequence
 
 MAX_TEXT_BYTES = 1_048_576
 MAX_COMMAND_SNAPSHOT_BYTES = 32 * 1_048_576
+IGNORED_DIRECTORY_NAMES = frozenset(
+    {
+        ".git",
+        ".hg",
+        ".svn",
+        ".worktrees",
+        "node_modules",
+        ".venv",
+        "venv",
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".coding-agent",
+        ".superpowers",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,15 +243,32 @@ class ConversationChangeTracker:
             snapshots[relative] = self._snapshot(relative)
         return Capture(snapshots)
 
+    def capture_workspace(self) -> Capture:
+        if self.workspace is None:
+            return Capture({}, workspace_scan=True)
+        snapshots, skipped = self._workspace_snapshots()
+        warning = f"预览不完整：{skipped} 个文件未保存文本快照" if skipped else None
+        return Capture(snapshots, warning, workspace_scan=True)
+
     def finish(self, capture: Capture) -> ChangeSet:
+        after_snapshots: dict[str, FileSnapshot]
+        warning = capture.warning
+        if capture.workspace_scan:
+            after_snapshots, skipped = self._workspace_snapshots()
+            if skipped:
+                after_warning = f"预览不完整：{skipped} 个文件未保存文本快照"
+                warning = "；".join(dict.fromkeys(filter(None, (warning, after_warning))))
+        else:
+            after_snapshots = {path: self._snapshot(path) for path in capture.snapshots}
         changed: list[str] = []
-        for path, before in capture.snapshots.items():
-            after = self._snapshot(path)
+        for path in sorted(set(capture.snapshots) | set(after_snapshots)):
+            before = capture.snapshots.get(path, FileSnapshot(False))
+            after = after_snapshots.get(path, FileSnapshot(False))
             if self._same(before, after):
                 continue
             self._merge(path, before, after)
             changed.append(path)
-        return ChangeSet(tuple(sorted(changed)), capture.warning)
+        return ChangeSet(tuple(changed), warning)
 
     def serialize(self) -> list[dict[str, Any]]:
         return [file_change_to_dict(self.changes[path]) for path in sorted(self.changes)]
@@ -303,6 +338,34 @@ class ConversationChangeTracker:
             return FileSnapshot(True, size, digest, reason="不是 UTF-8 文本")
         text = text.replace("\r\n", "\n").replace("\r", "\n")
         return FileSnapshot(True, size, digest, text=text)
+
+    def _workspace_snapshots(self) -> tuple[dict[str, FileSnapshot], int]:
+        if self.workspace is None:
+            return {}, 0
+        snapshots: dict[str, FileSnapshot] = {}
+        consumed = 0
+        skipped = 0
+        for root, directories, filenames in os.walk(self.workspace, followlinks=False):
+            directories[:] = sorted(
+                directory
+                for directory in directories
+                if directory not in IGNORED_DIRECTORY_NAMES
+            )
+            root_path = Path(root)
+            for filename in sorted(filenames):
+                path = root_path / filename
+                try:
+                    relative = path.relative_to(self.workspace).as_posix()
+                    remaining = max(0, self.max_command_bytes - consumed)
+                    snapshot = self._snapshot(relative, content_budget=remaining)
+                except (OSError, UnicodeError, ValueError):
+                    continue
+                snapshots[relative] = snapshot
+                if snapshot.text is not None:
+                    consumed += len(snapshot.text.encode("utf-8"))
+                elif snapshot.reason == "总快照容量已用尽":
+                    skipped += 1
+        return snapshots, skipped
 
     @staticmethod
     def _hash_file(path: Path) -> str:

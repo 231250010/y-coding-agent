@@ -118,6 +118,8 @@ class ToolRegistry:
         try:
             if self.change_tracker and name in {"write_file", "replace_text"}:
                 capture = self.change_tracker.capture_paths([str(arguments["path"])])
+            elif self.change_tracker and name == "run_command":
+                capture = self.change_tracker.capture_workspace()
             result = tool.handler(arguments)
         except (OSError, UnicodeError, ValueError) as exc:
             result = ToolResult(False, error=str(exc))

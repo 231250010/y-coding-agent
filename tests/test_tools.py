@@ -164,3 +164,32 @@ def test_command_can_be_cancelled(tmp_path: Path) -> None:
     finally:
         timer.cancel()
     assert not result.ok and "用户停止" in (result.error or "")
+
+
+def test_run_command_reports_created_modified_and_deleted_files(tmp_path: Path) -> None:
+    (tmp_path / "edit.txt").write_text("before\n", encoding="utf-8")
+    (tmp_path / "delete.txt").write_text("gone\n", encoding="utf-8")
+    tracker = ConversationChangeTracker(tmp_path)
+    tools = ToolRegistry(tmp_path, approver=lambda *_args: True, change_tracker=tracker)
+    command = (
+        'python -c "from pathlib import Path; '
+        "Path('edit.txt').write_text('after\\n'); "
+        "Path('made.txt').write_text('made\\n'); Path('delete.txt').unlink()\""
+    )
+
+    result = tools.execute("run_command", {"command": command, "timeout_seconds": 10})
+
+    assert result.ok is True
+    assert result.changes.paths == ("delete.txt", "edit.txt", "made.txt")
+
+
+def test_nonzero_command_still_reports_written_file(tmp_path: Path) -> None:
+    tracker = ConversationChangeTracker(tmp_path)
+    tools = ToolRegistry(tmp_path, approver=lambda *_args: True, change_tracker=tracker)
+    command = (
+        'python -c "from pathlib import Path; import sys; '
+        "Path('partial.txt').write_text('x'); sys.exit(7)\""
+    )
+    result = tools.execute("run_command", {"command": command, "timeout_seconds": 10})
+    assert result.ok is False
+    assert result.changes.paths == ("partial.txt",)
