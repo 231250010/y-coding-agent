@@ -604,11 +604,29 @@ class CodingAgentApp:
             undo=True,
         )
         self.input_box.pack(fill="x")
+        self.input_box.bind("<Return>", self._send_enter)
+        self.input_box.bind("<Shift-Return>", self._insert_newline)
         self.input_box.bind("<Control-Return>", self._send_shortcut)
         self.input_box.bind("<FocusIn>", lambda _event: self.input_border.configure(bg=SIGNATURE))
         self.input_box.bind("<FocusOut>", lambda _event: self.input_border.configure(bg=BORDER))
         composer_actions = tk.Frame(input_inner, bg=SURFACE)
         composer_actions.pack(fill="x", pady=(8, 0))
+        self.composer_menu_button = tk.Button(
+            composer_actions,
+            text="＋",
+            command=self._show_composer_menu,
+            bg=SURFACE,
+            fg=ACCENT,
+            activebackground=BLUSH,
+            activeforeground=ACCENT_HOVER,
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+            padx=3,
+            pady=0,
+            font=(UI_FONT, 11, "bold"),
+        )
+        self.composer_menu_button.pack(side="left", padx=(0, 6))
         self.workspace_label = tk.Label(
             composer_actions,
             text=str(self.config.workspace),
@@ -699,6 +717,20 @@ class CodingAgentApp:
         selected = filedialog.askdirectory(parent=self.root, initialdir=str(initial), title="选择项目目录")
         if selected:
             self._add_project(Path(selected))
+
+    def choose_workspace_for_current(self) -> None:
+        session = self._current()
+        if session is None:
+            return
+        if session.running:
+            messagebox.showwarning("任务运行中", "请先停止任务，再更改工作目录。", parent=self.root)
+            return
+        project = self._find_project(session.project_id)
+        initial = project.path if project else Path(self.settings.workspace or self.config.workspace)
+        selected = filedialog.askdirectory(parent=self.root, initialdir=str(initial), title="选择工作目录")
+        if not selected:
+            return
+        self._bind_task_to_path(session, Path(selected))
 
     def _add_project(self, path: Path) -> ProjectSession:
         project = self._ensure_project(path)
@@ -831,6 +863,14 @@ class CodingAgentApp:
 
     def _send_shortcut(self, _event: tk.Event[Any]) -> str:
         self.send_message()
+        return "break"
+
+    def _send_enter(self, _event: tk.Event[Any]) -> str:
+        self.send_message()
+        return "break"
+
+    def _insert_newline(self, _event: tk.Event[Any]) -> str:
+        self.input_box.insert("insert", "\n")
         return "break"
 
     def _run_task(self, task_id: str, text: str) -> None:
@@ -1027,6 +1067,36 @@ class CodingAgentApp:
             self.project_menu_button.winfo_rooty() + self.project_menu_button.winfo_height(),
         )
 
+    def _show_composer_menu(self) -> None:
+        session = self._current()
+        if session is None:
+            return
+        menu = tk.Menu(
+            self.root,
+            tearoff=False,
+            bg=SURFACE,
+            fg=TEXT,
+            activebackground=BLUSH,
+            activeforeground=TEXT,
+            relief="flat",
+            bd=0,
+            font=(UI_FONT, 10),
+        )
+        menu.add_command(
+            label="更换工作目录…" if self._find_project(session.project_id) else "选择工作目录…",
+            command=self.choose_workspace_for_current,
+        )
+        try:
+            menu.tk_popup(
+                self.composer_menu_button.winfo_rootx(),
+                self.composer_menu_button.winfo_rooty() + self.composer_menu_button.winfo_height(),
+            )
+        finally:
+            try:
+                menu.grab_release()
+            finally:
+                menu.destroy()
+
     def _show_tree_actions(self, event: tk.Event[Any]) -> str | None:
         item_id = self.task_tree.identify_row(event.y)
         if self._tree_item_target(item_id) is None:
@@ -1100,9 +1170,9 @@ class CodingAgentApp:
                 self.project_menu_button.pack(side="left", padx=(4, 0))
             self.workspace_label.configure(text=f"工作目录  {project.path}")
         else:
-            self.project_label.configure(text="")
+            self.project_label.configure(text="未选择工作目录 / 对话")
             self.project_menu_button.pack_forget()
-            self.workspace_label.configure(text="未绑定工作目录")
+            self.workspace_label.configure(text="尚未选择工作目录")
         self._render_transcript(session)
 
     def _render_transcript(self, session: TaskSession) -> None:
@@ -1115,6 +1185,8 @@ class CodingAgentApp:
             self.transcript.insert("end", body + "\n", "empty_body")
             for suggestion in suggestions:
                 self.transcript.insert("end", f"✦  {suggestion}\n", "empty_hint")
+            if session.project_id is None:
+                self.transcript.insert("end", "＋ 可启用本地文件操作\n", "empty_hint")
         for entry in session.entries:
             if entry.kind == "user":
                 self.transcript.insert("end", "你\n", "user_label")

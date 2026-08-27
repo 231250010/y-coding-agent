@@ -41,6 +41,47 @@ class RecordingTree:
         pass
 
 
+class RecordingText:
+    def __init__(self) -> None:
+        self.insertions: list[tuple[str, str]] = []
+
+    def insert(self, index: str, text: str) -> None:
+        self.insertions.append((index, text))
+
+
+class RecordingWidget:
+    def __init__(self) -> None:
+        self.configurations: list[dict[str, object]] = []
+        self.mapped = False
+
+    def configure(self, **options: object) -> None:
+        self.configurations.append(options)
+
+    def pack(self, **_options: object) -> None:
+        self.mapped = True
+
+    def pack_forget(self) -> None:
+        self.mapped = False
+
+    def winfo_ismapped(self) -> bool:
+        return self.mapped
+
+
+class RecordingTranscript(RecordingWidget):
+    def __init__(self) -> None:
+        super().__init__()
+        self.insertions: list[tuple[str, str, str]] = []
+
+    def delete(self, _start: str, _end: str) -> None:
+        pass
+
+    def insert(self, index: str, text: str, tag: str) -> None:
+        self.insertions.append((index, text, tag))
+
+    def see(self, _index: str) -> None:
+        pass
+
+
 def make_logic_only_app() -> CodingAgentApp:
     app = CodingAgentApp.__new__(CodingAgentApp)
     app.projects = []
@@ -234,6 +275,130 @@ def test_first_message_does_not_replace_a_custom_title(monkeypatch) -> None:
     CodingAgentApp.send_message(app)
 
     assert task.title == "新对话 自定义名称"
+
+
+def test_enter_sends_without_inserting_newline() -> None:
+    app = make_logic_only_app()
+    called = []
+    app.send_message = lambda: called.append(True)
+
+    assert app._send_enter(None) == "break"
+    assert called == [True]
+
+
+def test_shift_enter_inserts_newline() -> None:
+    app = make_logic_only_app()
+    app.input_box = RecordingText()
+
+    assert app._insert_newline(None) == "break"
+    assert app.input_box.insertions == [("insert", "\n")]
+
+
+def test_choose_workspace_binds_current_task_to_selected_directory(monkeypatch, tmp_path: Path) -> None:
+    app, task = make_app_with_projectless_task()
+    app.root = object()
+    app.config = SimpleNamespace(workspace=tmp_path)
+    selected = tmp_path / "workspace"
+    selected.mkdir()
+    asked: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        gui.filedialog,
+        "askdirectory",
+        lambda **options: asked.append(options) or str(selected),
+    )
+
+    app.choose_workspace_for_current()
+
+    assert task.project_id is not None
+    assert task.agent.workspace == selected.resolve()
+    assert asked == [{"parent": app.root, "initialdir": str(tmp_path), "title": "选择工作目录"}]
+
+
+def test_choose_workspace_does_not_open_picker_for_running_task(monkeypatch) -> None:
+    app, task = make_app_with_projectless_task()
+    app.root = object()
+    task.running = True
+    warnings: list[tuple[object, ...]] = []
+    monkeypatch.setattr(gui.filedialog, "askdirectory", lambda **_options: pytest.fail("picker should not open"))
+    monkeypatch.setattr(gui.messagebox, "showwarning", lambda *args, **_kwargs: warnings.append(args))
+
+    app.choose_workspace_for_current()
+
+    assert task.project_id is None
+    assert warnings == [("任务运行中", "请先停止任务，再更改工作目录。")]
+
+
+def test_choose_workspace_keeps_current_task_when_picker_is_cancelled(monkeypatch, tmp_path: Path) -> None:
+    app, task = make_app_with_projectless_task()
+    app.root = object()
+    app.config = SimpleNamespace(workspace=tmp_path)
+    monkeypatch.setattr(gui.filedialog, "askdirectory", lambda **_options: "")
+
+    app.choose_workspace_for_current()
+
+    assert task.project_id is None
+    assert task.agent.workspace is None
+
+
+def test_composer_menu_uses_projectless_workspace_label(monkeypatch) -> None:
+    app, _task = make_app_with_projectless_task()
+    app.root = object()
+    app.composer_menu_button = SimpleNamespace(
+        winfo_rootx=lambda: 20,
+        winfo_rooty=lambda: 30,
+        winfo_height=lambda: 10,
+    )
+    created: list[object] = []
+
+    class RecordingMenu:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.commands: list[dict[str, object]] = []
+            self.popup: tuple[int, int] | None = None
+            self.released = False
+            self.destroyed = False
+            created.append(self)
+
+        def add_command(self, **options: object) -> None:
+            self.commands.append(options)
+
+        def tk_popup(self, x_root: int, y_root: int) -> None:
+            self.popup = (x_root, y_root)
+
+        def grab_release(self) -> None:
+            self.released = True
+
+        def destroy(self) -> None:
+            self.destroyed = True
+
+    monkeypatch.setattr(gui.tk, "Menu", RecordingMenu)
+
+    app._show_composer_menu()
+
+    assert len(created) == 1
+    assert created[0].commands[0]["label"] == "选择工作目录…"
+    assert created[0].popup == (20, 40)
+    assert created[0].released is True
+    assert created[0].destroyed is True
+
+
+def test_projectless_rendering_labels_workspace_and_empty_state() -> None:
+    app, task = make_app_with_projectless_task()
+    app.title_label = RecordingWidget()
+    app.project_label = RecordingWidget()
+    app.project_menu_button = RecordingWidget()
+    app.workspace_label = RecordingWidget()
+    app.send_button = RecordingWidget()
+    app.stop_button = RecordingWidget()
+    app.input_box = RecordingWidget()
+    app.transcript = RecordingTranscript()
+    app._set_status = lambda *_args: None
+
+    CodingAgentApp._render_current(app)
+
+    assert app.project_label.configurations[-1] == {"text": "未选择工作目录 / 对话"}
+    assert app.workspace_label.configurations[-1] == {"text": "尚未选择工作目录"}
+    assert app.send_button.configurations[-1] == {"state": "normal"}
+    assert ("end", "＋ 可启用本地文件操作\n", "empty_hint") in app.transcript.insertions
 
 
 @pytest.mark.parametrize(("raw", "expected"), [("  新名字  ", "新名字"), ("a\nb", "a b"), ("   ", "")])
