@@ -158,3 +158,47 @@ def test_cancel_stops_before_model_call(tmp_path: Path) -> None:
     with pytest.raises(AgentStopped, match="用户停止"):
         agent.run("task")
     assert not model.requests
+
+
+def test_agent_retry_workflow_keeps_final_cumulative_diff(tmp_path: Path) -> None:
+    tracker = ConversationChangeTracker(tmp_path)
+    events: list[tuple[str, dict[str, Any]]] = []
+    responses = [
+        AssistantResponse(tool_calls=[call(
+            "c1",
+            "write_file",
+            {"path": "calc.py", "content": "def add(a, b):\n    return a - b\n"},
+        )]),
+        AssistantResponse(tool_calls=[call(
+            "c2",
+            "run_command",
+            {"command": 'python -c "import sys; sys.exit(1)"', "timeout_seconds": 10},
+        )]),
+        AssistantResponse(tool_calls=[call(
+            "c3",
+            "replace_text",
+            {"path": "calc.py", "old_text": "a - b", "new_text": "a + b"},
+        )]),
+        AssistantResponse(tool_calls=[call(
+            "c4",
+            "run_command",
+            {"command": 'python -c "from calc import add; assert add(2, 3) == 5"', "timeout_seconds": 10},
+        )]),
+        AssistantResponse("修复完成"),
+    ]
+    model = ScriptedModel(responses)
+    tools = ToolRegistry(tmp_path, approver=lambda *_args: True, change_tracker=tracker)
+    agent = CodingAgent(
+        model,
+        tools,
+        ContextManager(100_000),
+        on_event=lambda name, data: events.append((name, data)),
+    )
+
+    assert agent.run("实现并测试加法") == "修复完成"
+    assert tracker.changes["calc.py"].segments[0].latest.text == "def add(a, b):\n    return a + b\n"
+    assert any(
+        data.get("changes", {}).get("paths") == ["calc.py"]
+        for name, data in events
+        if name == "tool_end"
+    )

@@ -32,3 +32,8 @@ def test_dependency_boundary() -> None:
     assert 'coding-agent-cli = "coding_agent.cli:main"' in text
     for forbidden in ["openai-agents", "langchain", "llamaindex", "llama-index", "autogen", "crewai"]:
         assert forbidden not in text
+
+
+def test_visual_companion_state_is_git_ignored() -> None:
+    gitignore = Path(__file__).parents[1] / ".gitignore"
+    assert ".superpowers/" in gitignore.read_text(encoding="utf-8").splitlines()
