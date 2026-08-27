@@ -20,27 +20,47 @@ from .session_store import SessionStore
 from .tools import ToolRegistry
 
 
-# Visual system: a dark project rail beside a quiet, paper-like workspace.
-SIDEBAR = "#10232D"
-SIDEBAR_RAISED = "#193440"
-SIDEBAR_TEXT = "#F4F8F9"
-SIDEBAR_MUTED = "#9DB0B8"
-CANVAS = "#F3F6F7"
+# Visual system: a blueberry project rail beside a soft, milk-white workspace.
+# The friendly details stay concentrated in the mascot, status colors, and copy.
+SIDEBAR = "#29304A"
+SIDEBAR_RAISED = "#3A4262"
+SIDEBAR_TEXT = "#FFF9F7"
+SIDEBAR_MUTED = "#BFC3D3"
+CANVAS = "#FAF8F5"
 SURFACE = "#FFFFFF"
-BORDER = "#D8E1E5"
-TEXT = "#17252D"
-MUTED = "#687983"
-ACCENT = "#176F89"
-ACCENT_HOVER = "#12596E"
-SIGNATURE = "#E36B4A"
-USER_BG = "#E8F1F4"
-TOOL_BG = "#EEF3F4"
-ERROR = "#BF4D49"
-SUCCESS = "#27825C"
-WARNING = "#B86A2C"
+BORDER = "#E6E0DC"
+TEXT = "#394052"
+MUTED = "#687083"
+ACCENT = "#6D6AAE"
+ACCENT_HOVER = "#595691"
+SIGNATURE = "#F29A72"
+BLUSH = "#F2D6DA"
+MINT = "#BFDCCB"
+USER_BG = "#FAECEE"
+TOOL_BG = "#EEF6F1"
+ERROR = "#B5525B"
+SUCCESS = "#39785A"
+WARNING = "#A55D36"
+TOOL_STATUS = WARNING
 UI_FONT = "Microsoft YaHei UI"
 DISPLAY_FONT = "Microsoft YaHei UI"
 MONO_FONT = "Cascadia Mono"
+APP_NAME = "小码"
+ASSISTANT_LABEL = APP_NAME
+COMPOSER_LINES = 3
+EMPTY_STATE = (
+    "今天想让小码做点什么？",
+    "说清目标，剩下的交给我慢慢理顺。",
+    (
+        "修复失败的测试，并解释原因",
+        "读懂这个项目，告诉我从哪里开始",
+        "优化当前代码，但不要改变功能",
+    ),
+)
+
+
+def _pack_composer(composer: tk.Misc, transcript: tk.Misc) -> None:
+    composer.pack(fill="x", side="bottom", before=transcript)
 
 
 @dataclass(slots=True)
@@ -254,7 +274,7 @@ class CodingAgentApp:
         self.root.bind("<Control-o>", lambda _event: self.choose_project())
 
     def _configure_window(self) -> None:
-        self.root.title("Coding Agent · 本地代码工作台")
+        self.root.title(f"{APP_NAME} · 本地代码工作台")
         self.root.geometry("1240x800")
         self.root.minsize(960, 640)
         self.root.configure(bg=CANVAS)
@@ -273,35 +293,35 @@ class CodingAgentApp:
         split = tk.PanedWindow(self.root, orient="horizontal", bg=BORDER, sashwidth=1, bd=0)
         split.pack(fill="both", expand=True)
 
-        sidebar = tk.Frame(split, bg=SIDEBAR, width=294)
+        sidebar = tk.Frame(split, bg=SIDEBAR, width=304)
         content = tk.Frame(split, bg=CANVAS)
-        split.add(sidebar, minsize=250, width=294)
+        split.add(sidebar, minsize=260, width=304)
         split.add(content, minsize=680)
 
         side_header = tk.Frame(sidebar, bg=SIDEBAR, padx=18, pady=19)
         side_header.pack(fill="x")
         mark = tk.Label(
             side_header,
-            text="CA",
+            text="◕‿◕",
             bg=SIGNATURE,
-            fg="white",
-            font=(DISPLAY_FONT, 11),
-            padx=8,
-            pady=7,
+            fg=SIDEBAR,
+            font=(DISPLAY_FONT, 12, "bold"),
+            padx=10,
+            pady=8,
         )
         mark.pack(side="left", padx=(0, 10))
         identity = tk.Frame(side_header, bg=SIDEBAR)
         identity.pack(side="left", fill="x", expand=True)
         tk.Label(
             identity,
-            text="CODING AGENT",
+            text=f"{APP_NAME}  CODING AGENT",
             bg=SIDEBAR,
             fg=SIDEBAR_TEXT,
-            font=(DISPLAY_FONT, 12),
+            font=(DISPLAY_FONT, 12, "bold"),
         ).pack(anchor="w")
         tk.Label(
             identity,
-            text="本地代码工作台",
+            text="陪你慢慢把代码理顺",
             bg=SIDEBAR,
             fg=SIDEBAR_MUTED,
             font=(UI_FONT, 9),
@@ -311,14 +331,14 @@ class CodingAgentApp:
         section.pack(fill="x", pady=(10, 8))
         tk.Label(
             section,
-            text="项目与对话",
+            text="工作区",
             bg=SIDEBAR,
             fg=SIDEBAR_MUTED,
             font=(UI_FONT, 9, "bold"),
         ).pack(side="left")
         tk.Button(
             section,
-            text="添加项目",
+            text="＋ 添加项目",
             command=self.choose_project,
             bg=SIDEBAR,
             fg=SIDEBAR_TEXT,
@@ -332,7 +352,7 @@ class CodingAgentApp:
 
         task_actions = tk.Frame(sidebar, bg=SIDEBAR, padx=14)
         task_actions.pack(fill="x", pady=(0, 10))
-        self._sidebar_button(task_actions, "＋  新建对话", self.new_task, primary=True).pack(fill="x")
+        self._sidebar_button(task_actions, "＋  开始新对话", self.new_task, primary=True).pack(fill="x")
 
         tree_style = ttk.Style(self.root)
         tree_style.configure(
@@ -341,7 +361,7 @@ class CodingAgentApp:
             fieldbackground=SIDEBAR,
             foreground=SIDEBAR_TEXT,
             borderwidth=0,
-            rowheight=34,
+            rowheight=38,
             font=(UI_FONT, 10),
             indent=18,
             relief="flat",
@@ -364,20 +384,20 @@ class CodingAgentApp:
         )
         self.task_tree.tag_configure("project", foreground=SIDEBAR_MUTED, font=(UI_FONT, 9, "bold"))
         self.task_tree.tag_configure("task", foreground=SIDEBAR_TEXT, font=(UI_FONT, 10))
-        self.task_tree.tag_configure("running", foreground="#68C5D6", font=(UI_FONT, 10, "bold"))
+        self.task_tree.tag_configure("running", foreground="#F5B493", font=(UI_FONT, 10, "bold"))
         self.task_tree.pack(fill="both", expand=True, padx=10, pady=(0, 8))
         self.task_tree.bind("<<TreeviewSelect>>", self._select_task)
 
         side_footer = tk.Frame(sidebar, bg=SIDEBAR, padx=14, pady=14)
         side_footer.pack(fill="x")
-        self._sidebar_button(side_footer, "移除", self.delete_task).pack(side="left")
-        self._sidebar_button(side_footer, "连接设置", self.open_settings).pack(side="right")
+        self._sidebar_button(side_footer, "移除对话", self.delete_task).pack(side="left")
+        self._sidebar_button(side_footer, "连接设置  ⚙", self.open_settings).pack(side="right")
 
-        self.activity_bar = tk.Frame(content, bg=ACCENT, height=4)
+        self.activity_bar = tk.Frame(content, bg=ACCENT, height=5)
         self.activity_bar.pack(fill="x")
         self.activity_bar.pack_propagate(False)
 
-        header = tk.Frame(content, bg=CANVAS, padx=34, pady=18)
+        header = tk.Frame(content, bg=CANVAS, padx=38, pady=20)
         header.pack(fill="x")
         title_stack = tk.Frame(header, bg=CANVAS)
         title_stack.pack(side="left", fill="x", expand=True)
@@ -391,17 +411,25 @@ class CodingAgentApp:
         self.project_label.pack(anchor="w")
         self.title_label = tk.Label(title_stack, text="", bg=CANVAS, fg=TEXT, font=(DISPLAY_FONT, 20))
         self.title_label.pack(anchor="w", pady=(2, 0))
-        self.status_label = tk.Label(header, text="就绪", bg=CANVAS, fg=MUTED, font=(UI_FONT, 10))
+        self.status_label = tk.Label(
+            header,
+            text="● 就绪",
+            bg=CANVAS,
+            fg=MUTED,
+            font=(UI_FONT, 9, "bold"),
+            padx=8,
+            pady=4,
+        )
         self.status_label.pack(side="right", padx=(12, 0))
         self.stop_button = tk.Button(
             header,
             text="停止",
             command=self.stop_task,
             state="disabled",
-            bg="#F7E8E5",
+            bg="#F8E8E9",
             fg=ERROR,
             disabledforeground="#B9A8A5",
-            activebackground="#EFD8D4",
+            activebackground=BLUSH,
             activeforeground=ERROR,
             relief="flat",
             cursor="hand2",
@@ -410,7 +438,7 @@ class CodingAgentApp:
         )
         self.stop_button.pack(side="right")
 
-        transcript_outer = tk.Frame(content, bg=CANVAS, padx=34)
+        transcript_outer = tk.Frame(content, bg=CANVAS, padx=38)
         transcript_outer.pack(fill="both", expand=True)
         transcript_frame = tk.Frame(transcript_outer, bg=SURFACE, highlightthickness=1, highlightbackground=BORDER)
         transcript_frame.pack(fill="both", expand=True)
@@ -426,23 +454,23 @@ class CodingAgentApp:
             relief="flat",
             highlightthickness=0,
             font=(UI_FONT, 11),
-            padx=28,
-            pady=22,
+            padx=32,
+            pady=26,
             yscrollcommand=scrollbar.set,
         )
         self.transcript.pack(fill="both", expand=True)
         scrollbar.configure(command=self.transcript.yview)
         self._configure_transcript_tags()
 
-        composer = tk.Frame(content, bg=CANVAS, padx=34, pady=14)
-        composer.pack(fill="x")
+        composer = tk.Frame(content, bg=CANVAS, padx=38, pady=14)
+        _pack_composer(composer, transcript_outer)
         self.input_border = tk.Frame(composer, bg=BORDER, padx=1, pady=1)
         self.input_border.pack(fill="x")
-        input_inner = tk.Frame(self.input_border, bg=SURFACE, padx=15, pady=12)
+        input_inner = tk.Frame(self.input_border, bg=SURFACE, padx=17, pady=11)
         input_inner.pack(fill="x")
         self.input_box = tk.Text(
             input_inner,
-            height=3,
+            height=COMPOSER_LINES,
             wrap="word",
             bg=SURFACE,
             fg=TEXT,
@@ -454,7 +482,7 @@ class CodingAgentApp:
         )
         self.input_box.pack(fill="x")
         self.input_box.bind("<Control-Return>", self._send_shortcut)
-        self.input_box.bind("<FocusIn>", lambda _event: self.input_border.configure(bg=ACCENT))
+        self.input_box.bind("<FocusIn>", lambda _event: self.input_border.configure(bg=SIGNATURE))
         self.input_box.bind("<FocusOut>", lambda _event: self.input_border.configure(bg=BORDER))
         composer_actions = tk.Frame(input_inner, bg=SURFACE)
         composer_actions.pack(fill="x", pady=(8, 0))
@@ -468,19 +496,19 @@ class CodingAgentApp:
         self.workspace_label.pack(side="left")
         tk.Label(
             composer_actions,
-            text="Ctrl + Enter 运行",
+            text="Ctrl + Enter 开始",
             bg=SURFACE,
             fg=MUTED,
             font=(UI_FONT, 9),
         ).pack(side="right", padx=(0, 12))
         self.send_button = tk.Button(
             composer_actions,
-            text="运行任务  →",
+            text="开始工作  →",
             command=self.send_message,
             bg=SIGNATURE,
-            fg="white",
-            activebackground="#C9593D",
-            activeforeground="white",
+            fg=SIDEBAR,
+            activebackground="#E98662",
+            activeforeground=SIDEBAR,
             relief="flat",
             cursor="hand2",
             padx=18,
@@ -496,7 +524,7 @@ class CodingAgentApp:
             command=command,
             bg=SIDEBAR_RAISED if primary else SIDEBAR,
             fg=SIDEBAR_TEXT if primary else SIDEBAR_MUTED,
-            activebackground="#214451",
+            activebackground="#485174",
             activeforeground=SIDEBAR_TEXT,
             relief="flat",
             bd=0,
@@ -513,9 +541,10 @@ class CodingAgentApp:
         self.transcript.tag_configure("tool", foreground="#45616A", background=TOOL_BG, font=(MONO_FONT, 9), lmargin1=16, lmargin2=16, rmargin=16, spacing1=7, spacing3=7)
         self.transcript.tag_configure("error", foreground=ERROR, lmargin1=16, lmargin2=16, rmargin=16, spacing1=7, spacing3=7)
         self.transcript.tag_configure("system", foreground=MUTED, lmargin1=16, lmargin2=16, rmargin=16, spacing1=7, spacing3=7)
-        self.transcript.tag_configure("empty_title", foreground=TEXT, font=(DISPLAY_FONT, 18), justify="center", spacing1=80, spacing3=8)
+        self.transcript.tag_configure("empty_face", foreground=SIGNATURE, font=(DISPLAY_FONT, 22, "bold"), justify="center", spacing1=60, spacing3=8)
+        self.transcript.tag_configure("empty_title", foreground=TEXT, font=(DISPLAY_FONT, 18, "bold"), justify="center", spacing3=8)
         self.transcript.tag_configure("empty_body", foreground=MUTED, font=(UI_FONT, 10), justify="center", spacing3=5)
-        self.transcript.tag_configure("empty_hint", foreground=ACCENT, font=(UI_FONT, 10), justify="center", spacing1=14)
+        self.transcript.tag_configure("empty_hint", foreground=ACCENT, font=(UI_FONT, 10), justify="center", spacing1=8, spacing3=4)
 
     def _make_agent(self, task_id: str, cancel_event: threading.Event, workspace: Path) -> CodingAgent:
         model = OpenAIChatModel(
@@ -743,7 +772,7 @@ class CodingAgentApp:
             session.entries.append(ChatEntry("system", "正在压缩较早的对话上下文…"))
         elif name == "tool_start":
             status = f"正在执行 {data['name']}"
-            tone = SIGNATURE
+            tone = TOOL_STATUS
             arguments = data.get("arguments", "")
             session.entries.append(ChatEntry("tool", f"→ {data['name']}\n{arguments[:1200]}"))
         elif name == "tool_end":
@@ -807,15 +836,18 @@ class CodingAgentApp:
         self.transcript.configure(state="normal")
         self.transcript.delete("1.0", "end")
         if not session.entries:
-            self.transcript.insert("end", "从一个具体改动开始\n", "empty_title")
-            self.transcript.insert("end", "说明目标、预期结果，或直接指出需要检查的文件。\n", "empty_body")
-            self.transcript.insert("end", "例如：读取项目，修复失败的测试并解释原因\n", "empty_hint")
+            title, body, suggestions = EMPTY_STATE
+            self.transcript.insert("end", "◕‿◕\n", "empty_face")
+            self.transcript.insert("end", title + "\n", "empty_title")
+            self.transcript.insert("end", body + "\n", "empty_body")
+            for suggestion in suggestions:
+                self.transcript.insert("end", f"✦  {suggestion}\n", "empty_hint")
         for entry in session.entries:
             if entry.kind == "user":
                 self.transcript.insert("end", "你\n", "user_label")
                 self.transcript.insert("end", entry.text + "\n", "user")
             elif entry.kind == "assistant":
-                self.transcript.insert("end", "Coding Agent\n", "assistant_label")
+                self.transcript.insert("end", ASSISTANT_LABEL + "\n", "assistant_label")
                 self.transcript.insert("end", entry.text + "\n", "assistant")
             else:
                 self.transcript.insert("end", entry.text + "\n", entry.kind)
@@ -823,7 +855,7 @@ class CodingAgentApp:
         self.transcript.see("end")
 
     def _set_status(self, text: str, tone: str) -> None:
-        self.status_label.configure(text=text, fg=tone)
+        self.status_label.configure(text=f"● {text}", fg=tone)
         self.activity_bar.configure(bg=tone)
 
     def open_settings(self) -> None:
