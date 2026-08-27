@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from coding_agent.changes import ConversationChangeTracker
 from coding_agent.tools import PathGuard, ToolRegistry
 
 
@@ -39,6 +40,30 @@ def test_write_read_list_and_replace(tmp_path: Path) -> None:
     )
     assert replaced.ok
     assert (tmp_path / "src" / "你好.txt").read_text(encoding="utf-8").endswith("新内容")
+
+
+def test_write_and_replace_report_cumulative_local_changes(tmp_path: Path) -> None:
+    tracker = ConversationChangeTracker(tmp_path)
+    tools = ToolRegistry(tmp_path, approver=lambda *_args: True, change_tracker=tracker)
+
+    written = tools.execute("write_file", {"path": "a.txt", "content": "old\n"})
+    replaced = tools.execute(
+        "replace_text", {"path": "a.txt", "old_text": "old", "new_text": "new\nextra"}
+    )
+
+    assert written.changes.paths == ("a.txt",)
+    assert replaced.changes.paths == ("a.txt",)
+    assert (tracker.changes["a.txt"].added, tracker.changes["a.txt"].deleted) == (2, 0)
+    assert "changes" not in written.to_message()
+
+
+def test_failed_replace_that_does_not_write_has_no_changes(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("same same", encoding="utf-8")
+    tracker = ConversationChangeTracker(tmp_path)
+    tools = ToolRegistry(tmp_path, change_tracker=tracker)
+    result = tools.execute("replace_text", {"path": "a.txt", "old_text": "same", "new_text": "x"})
+    assert result.ok is False
+    assert result.changes.paths == ()
 
 
 def test_replace_requires_unique_match(tmp_path: Path) -> None:

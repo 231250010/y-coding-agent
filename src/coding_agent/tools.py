@@ -7,10 +7,11 @@ import signal
 import shutil
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
+from .changes import Capture, ChangeSet, ConversationChangeTracker
 from .safety import CommandPolicy, RiskLevel
 
 
@@ -25,6 +26,7 @@ class ToolResult:
     ok: bool
     output: str = ""
     error: str | None = None
+    changes: ChangeSet = field(default_factory=ChangeSet)
 
     def to_message(self) -> str:
         payload: dict[str, Any] = {"ok": self.ok}
@@ -81,11 +83,13 @@ class ToolRegistry:
         is_cancelled: CancelCallback | None = None,
         approval_mode: str = "ask",
         max_output: int = MAX_TOOL_OUTPUT,
+        change_tracker: ConversationChangeTracker | None = None,
     ) -> None:
         self.approver = approver or (lambda _command, _risk, _reason: False)
         self.is_cancelled = is_cancelled or (lambda: False)
         self.approval_mode = approval_mode
         self.max_output = max_output
+        self.change_tracker = change_tracker
         if workspace is None:
             self.workspace = None
             self.guard = None
@@ -106,15 +110,26 @@ class ToolRegistry:
         tool = self._tools.get(name)
         if tool is None:
             return ToolResult(False, error=f"未知工具: {name}")
+        validation_error = self._validate(arguments, tool.parameters)
+        if validation_error:
+            return ToolResult(False, error=validation_error)
+
+        capture: Capture | None = None
         try:
-            validation_error = self._validate(arguments, tool.parameters)
-            if validation_error:
-                return ToolResult(False, error=validation_error)
-            return tool.handler(arguments)
+            if self.change_tracker and name in {"write_file", "replace_text"}:
+                capture = self.change_tracker.capture_paths([str(arguments["path"])])
+            result = tool.handler(arguments)
         except (OSError, UnicodeError, ValueError) as exc:
-            return ToolResult(False, error=str(exc))
+            result = ToolResult(False, error=str(exc))
         except Exception as exc:
-            return ToolResult(False, error=f"工具执行异常: {type(exc).__name__}: {exc}")
+            result = ToolResult(False, error=f"工具执行异常: {type(exc).__name__}: {exc}")
+        if capture is not None and self.change_tracker is not None:
+            try:
+                changes = self.change_tracker.finish(capture)
+            except (OSError, UnicodeError, ValueError) as exc:
+                changes = ChangeSet(warning=f"文件改动追踪失败: {exc}")
+            result = replace(result, changes=changes)
+        return result
 
     @staticmethod
     def _validate(arguments: Any, schema: dict[str, Any]) -> str | None:

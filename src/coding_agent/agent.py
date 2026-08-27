@@ -76,7 +76,15 @@ class CodingAgent:
                 )
                 self.on_event(
                     "tool_end",
-                    {"name": call.name, "ok": result.ok, "output": result.output, "error": result.error},
+                    {
+                        "name": call.name,
+                        "ok": result.ok,
+                        "output": result.output,
+                        "error": result.error,
+                        "changes": result.changes.to_event(self.tools.change_tracker.changes)
+                        if self.tools.change_tracker
+                        else {"paths": [], "warning": None, "files": []},
+                    },
                 )
                 self._check_cancelled()
                 if result.ok:

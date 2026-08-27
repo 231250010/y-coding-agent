@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from coding_agent.agent import AgentStopped, CodingAgent
+from coding_agent.changes import ConversationChangeTracker
 from coding_agent.context import ContextManager
 from coding_agent.model import AssistantResponse, Message, ToolCall
 from coding_agent.tools import ToolRegistry
@@ -55,6 +56,29 @@ def test_single_tool_round_trip(tmp_path: Path) -> None:
     second_request = model.requests[1][0]
     assert second_request[-1]["role"] == "tool"
     assert second_request[-1]["tool_call_id"] == "c1"
+
+
+def test_tool_end_exposes_local_changes_without_sending_them_to_model(tmp_path: Path) -> None:
+    events: list[tuple[str, dict[str, Any]]] = []
+    tracker = ConversationChangeTracker(tmp_path)
+    model = ScriptedModel([
+        AssistantResponse(tool_calls=[call("c1", "write_file", {"path": "a.txt", "content": "hello\n"})]),
+        AssistantResponse("done"),
+    ])
+    tools = ToolRegistry(tmp_path, approver=lambda *_args: True, change_tracker=tracker)
+    agent = CodingAgent(
+        model,
+        tools,
+        ContextManager(100_000),
+        on_event=lambda name, data: events.append((name, data)),
+    )
+
+    agent.run("write")
+
+    event = next(data for name, data in events if name == "tool_end")
+    assert event["changes"]["paths"] == ["a.txt"]
+    tool_payload = json.loads(model.requests[1][0][-1]["content"])
+    assert "changes" not in tool_payload
 
 
 def test_multiple_tools_are_executed_in_order(tmp_path: Path) -> None:
