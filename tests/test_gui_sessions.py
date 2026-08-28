@@ -9,7 +9,14 @@ import pytest
 
 from coding_agent import gui
 from coding_agent.changes import ConversationChangeTracker
-from coding_agent.gui import CodingAgentApp, ProjectSession, TaskSession, normalize_display_name
+from coding_agent.gui import (
+    ChatEntry,
+    CodingAgentApp,
+    ProjectSession,
+    TaskSession,
+    collapse_change_entries,
+    normalize_display_name,
+)
 
 
 class FakeAgent:
@@ -298,7 +305,7 @@ def test_saves_version_three_with_conversation_changes(tmp_path: Path) -> None:
     assert payload["tasks"][0]["review_path"] == "a.txt"
 
 
-def test_tool_end_adds_clickable_change_paths_to_entry(tmp_path: Path) -> None:
+def test_tool_end_collects_unique_paths_without_attaching_cards(tmp_path: Path) -> None:
     app, _project, task = make_app_with_bound_task()
     task.change_tracker = ConversationChangeTracker(tmp_path)
     app._set_status = lambda *_args: None
@@ -313,8 +320,42 @@ def test_tool_end_adds_clickable_change_paths_to_entry(tmp_path: Path) -> None:
     }
 
     app._handle_agent_event(task.id, "tool_end", data)
+    app._handle_agent_event(task.id, "tool_end", data)
 
-    assert task.entries[-1].change_paths == ("a.txt",)
+    assert task.entries[-1].change_paths == ()
+    assert task.pending_change_paths == ["a.txt"]
+
+
+def test_complete_attaches_pending_changes_once_to_final_reply(tmp_path: Path) -> None:
+    app, _project, task = make_app_with_bound_task()
+    task.change_tracker = ConversationChangeTracker(tmp_path)
+    capture = task.change_tracker.capture_paths(["a.txt"])
+    (tmp_path / "a.txt").write_text("changed\n", encoding="utf-8")
+    task.change_tracker.finish(capture)
+    task.pending_change_paths.extend(["a.txt", "a.txt"])
+    app._set_status = lambda *_args: None
+
+    app._handle_event(("complete", task.id, "处理完成"))
+
+    assert task.entries[-1] == ChatEntry("assistant", "处理完成", ("a.txt",))
+    assert task.pending_change_paths == []
+    assert sum(bool(entry.change_paths) for entry in task.entries) == 1
+
+
+def test_old_tool_change_entries_collapse_into_last_reply() -> None:
+    entries = [
+        ChatEntry("user", "开始"),
+        ChatEntry("tool", "第一次", ("a.py", "b.py")),
+        ChatEntry("tool", "第二次", ("a.py",)),
+        ChatEntry("assistant", "完成"),
+    ]
+
+    pending = collapse_change_entries(entries)
+
+    assert pending == []
+    assert entries[1].change_paths == ()
+    assert entries[2].change_paths == ()
+    assert entries[3].change_paths == ("a.py", "b.py")
 
 
 def test_open_change_only_reads_current_task(tmp_path: Path) -> None:

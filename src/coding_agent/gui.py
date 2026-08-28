@@ -108,6 +108,43 @@ class ChatEntry:
     change_paths: tuple[str, ...] = ()
 
 
+def collapse_change_entries(entries: list[ChatEntry]) -> list[str]:
+    """Move legacy per-tool file links to the final entry of each user turn."""
+
+    unfinished: list[str] = []
+
+    def collapse_round(round_entries: list[ChatEntry]) -> None:
+        paths: list[str] = []
+        for entry in round_entries:
+            for path in entry.change_paths:
+                if path not in paths:
+                    paths.append(path)
+            entry.change_paths = ()
+        if not paths:
+            return
+        target = next(
+            (
+                entry
+                for entry in reversed(round_entries)
+                if entry.kind in {"assistant", "error", "system"}
+            ),
+            None,
+        )
+        if target is None:
+            unfinished.extend(path for path in paths if path not in unfinished)
+        else:
+            target.change_paths = tuple(paths)
+
+    current_round: list[ChatEntry] = []
+    for entry in entries:
+        if entry.kind == "user" and current_round:
+            collapse_round(current_round)
+            current_round = []
+        current_round.append(entry)
+    collapse_round(current_round)
+    return unfinished
+
+
 @dataclass(slots=True)
 class TaskSession:
     id: str
@@ -122,6 +159,7 @@ class TaskSession:
     running: bool = False
     title_is_custom: bool = False
     review_path: str | None = None
+    pending_change_paths: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -742,6 +780,16 @@ class CodingAgentApp:
         self.transcript.tag_configure("tool", foreground="#45616A", background=TOOL_BG, font=(MONO_FONT, 9), lmargin1=16, lmargin2=16, rmargin=16, spacing1=7, spacing3=7)
         self.transcript.tag_configure("error", foreground=ERROR, lmargin1=16, lmargin2=16, rmargin=16, spacing1=7, spacing3=7)
         self.transcript.tag_configure("system", foreground=MUTED, lmargin1=16, lmargin2=16, rmargin=16, spacing1=7, spacing3=7)
+        self.transcript.tag_configure(
+            "changes_header",
+            foreground=MUTED,
+            font=(UI_FONT, 9, "bold"),
+            lmargin1=16,
+            lmargin2=16,
+            rmargin=16,
+            spacing1=10,
+            spacing3=5,
+        )
         self.transcript.tag_configure("empty_face", foreground=SIGNATURE, font=(DISPLAY_FONT, 22, "bold"), justify="center", spacing1=60, spacing3=8)
         self.transcript.tag_configure("empty_title", foreground=TEXT, font=(DISPLAY_FONT, 18, "bold"), justify="center", spacing3=8)
         self.transcript.tag_configure("empty_body", foreground=MUTED, font=(UI_FONT, 10), justify="center", spacing3=5)
@@ -931,6 +979,7 @@ class CodingAgentApp:
         self.input_box.delete("1.0", "end")
         if not session.title_is_custom and not session.entries:
             session.title = text.replace("\n", " ")[:32]
+        session.pending_change_paths.clear()
         session.entries.append(ChatEntry("user", text))
         session.running = True
         session.cancel_event.clear()
@@ -1003,7 +1052,13 @@ class CodingAgentApp:
                 return
             session.running = False
             entry_kind = "assistant" if kind == "complete" else ("system" if kind == "cancelled" else "error")
-            session.entries.append(ChatEntry(entry_kind, text))
+            final_paths = tuple(
+                path
+                for path in dict.fromkeys(session.pending_change_paths)
+                if path in session.change_tracker.changes
+            )
+            session.entries.append(ChatEntry(entry_kind, text, final_paths))
+            session.pending_change_paths.clear()
             self._refresh_task_tree()
             self._save_sessions()
             if task_id == self.current_id:
@@ -1059,8 +1114,11 @@ class CodingAgentApp:
             if isinstance(tracking_warning, str) and tracking_warning:
                 rendered += f"\n⚠ {tracking_warning}"
             session.entries.append(
-                ChatEntry("tool" if data["ok"] else "error", rendered, change_paths)
+                ChatEntry("tool" if data["ok"] else "error", rendered)
             )
+            for path in change_paths:
+                if path not in session.pending_change_paths:
+                    session.pending_change_paths.append(path)
             self._save_sessions()
         else:
             return
@@ -1356,10 +1414,20 @@ class CodingAgentApp:
                 self.transcript.insert("end", entry.text + "\n", "assistant")
             else:
                 self.transcript.insert("end", entry.text + "\n", entry.kind)
-            for path in entry.change_paths:
+            visible_paths = [
+                path
+                for path in dict.fromkeys(entry.change_paths)
+                if path in session.change_tracker.changes
+            ]
+            if visible_paths:
+                self.transcript.insert(
+                    "end",
+                    f"本轮改动 · {len(visible_paths)} 个文件\n",
+                    "changes_header",
+                )
+            for path in visible_paths:
                 change = session.change_tracker.changes.get(path)
-                if change is None:
-                    continue
+                assert change is not None
                 card = FileChangeCard(
                     self.transcript,
                     change,
@@ -1469,6 +1537,23 @@ class CodingAgentApp:
                 for entry in raw_entries
                 if isinstance(entry, dict)
             ] if isinstance(raw_entries, list) else []
+            unfinished_paths = collapse_change_entries(entries)
+            raw_pending_paths = raw_task.get("pending_change_paths", [])
+            if isinstance(raw_pending_paths, list):
+                for path in raw_pending_paths:
+                    if isinstance(path, str) and path not in unfinished_paths:
+                        unfinished_paths.append(path)
+            recovered_paths = tuple(
+                path for path in unfinished_paths if path in change_tracker.changes
+            )
+            if recovered_paths:
+                entries.append(
+                    ChatEntry(
+                        "system",
+                        "上次任务在结束前中断，以下为已经记录的文件改动。",
+                        recovered_paths,
+                    )
+                )
             raw_review_path = raw_task.get("review_path")
             review_path = (
                 raw_review_path
@@ -1486,6 +1571,7 @@ class CodingAgentApp:
                     entries=entries,
                     title_is_custom=bool(raw_task.get("title_is_custom", False)),
                     review_path=review_path,
+                    pending_change_paths=[],
                 )
             )
 
@@ -1522,6 +1608,7 @@ class CodingAgentApp:
                     "history": task.agent.history,
                     "file_changes": task.change_tracker.serialize(),
                     "review_path": task.review_path,
+                    "pending_change_paths": list(task.pending_change_paths),
                 }
                 for task in self.tasks
             ],
