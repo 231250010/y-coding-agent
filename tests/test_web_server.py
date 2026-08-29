@@ -153,3 +153,25 @@ def test_static_routes_do_not_allow_path_traversal(tmp_path: Path) -> None:
     assert page_type.startswith("text/html")
     assert b'id="app"' in page
     assert traversal_status == 404
+
+
+def test_delete_routes_return_204_and_reflect_state(tmp_path: Path) -> None:
+    with running_server(tmp_path) as (_runtime, port):
+        _, _, project_raw = request(port, "POST", "/api/projects", {"path": str(tmp_path)})
+        project = json.loads(project_raw)["project"]
+        _, _, task_raw = request(port, "POST", "/api/conversations", {"project_id": project["id"]})
+        task = json.loads(task_raw)["task"]
+
+        delete_project_status, _, _ = request(port, "DELETE", f"/api/projects/{project['id']}")
+        _, _, state_raw = request(port, "GET", "/api/state")
+        state = json.loads(state_raw)
+
+        delete_task_status, _, _ = request(port, "DELETE", f"/api/conversations/{task['id']}")
+        _, _, final_raw = request(port, "GET", "/api/state")
+        final = json.loads(final_raw)
+
+    assert delete_project_status == 204
+    assert state["projects"] == []
+    assert any(item["id"] == task["id"] and item["project_id"] is None for item in state["tasks"])
+    assert delete_task_status == 204
+    assert final["tasks"] == []

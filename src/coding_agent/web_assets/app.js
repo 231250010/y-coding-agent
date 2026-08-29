@@ -17,11 +17,15 @@ const ui = {
   renameForm: document.querySelector("#rename-form"), renameValue: document.querySelector("#rename-value"),
   approvalDialog: document.querySelector("#approval-dialog"), approvalReason: document.querySelector("#approval-reason"),
   approvalCommand: document.querySelector("#approval-command"), toast: document.querySelector("#toast"),
+  deleteDialog: document.querySelector("#delete-dialog"), deleteForm: document.querySelector("#delete-form"),
+  deleteName: document.querySelector("#delete-name"), deleteDescription: document.querySelector("#delete-description"),
 };
 
 let state = { projects: [], tasks: [], approvals: [], settings: {}, current_id: null };
 let workspaceMode = "project";
 let renameTarget = null;
+let deleteTarget = null;
+let menuEl = null;
 let shownApproval = null;
 let lastTranscriptKey = "";
 let toastTimer = null;
@@ -70,8 +74,8 @@ function taskNode(task) {
   select.addEventListener("click", () => selectTask(task.id));
   const menu = element("button", "mini-menu", "•••");
   menu.type = "button";
-  menu.setAttribute("aria-label", `重命名对话 ${task.title}`);
-  menu.addEventListener("click", () => openRename("task", task.id, task.title));
+  menu.setAttribute("aria-label", `对话菜单 ${task.title}`);
+  menu.addEventListener("click", (event) => { event.stopPropagation(); openItemMenu("task", task.id, task.title, menu); });
   item.append(select, menu);
   return item;
 }
@@ -86,8 +90,8 @@ function renderSidebar() {
     name.title = project.path;
     const menu = element("button", "mini-menu", "•••");
     menu.type = "button";
-    menu.setAttribute("aria-label", `重命名项目 ${project.title}`);
-    menu.addEventListener("click", () => openRename("project", project.id, project.title));
+    menu.setAttribute("aria-label", `项目菜单 ${project.title}`);
+    menu.addEventListener("click", (event) => { event.stopPropagation(); openItemMenu("project", project.id, project.title, menu); });
     heading.append(name, menu);
     const tasks = element("div", "task-list");
     for (const task of state.tasks.filter((item) => item.project_id === project.id)) tasks.append(taskNode(task));
@@ -277,6 +281,61 @@ async function submitRename(event) {
   } catch (error) { toast(error.message); }
 }
 
+function itemMenuElement() {
+  if (menuEl) return menuEl;
+  menuEl = element("div", "item-menu");
+  menuEl.hidden = true;
+  document.body.append(menuEl);
+  document.addEventListener("click", (event) => {
+    if (!menuEl.hidden && !menuEl.contains(event.target)) menuEl.hidden = true;
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") menuEl.hidden = true;
+  });
+  return menuEl;
+}
+
+function openItemMenu(kind, id, title, anchor) {
+  const menu = itemMenuElement();
+  menu.replaceChildren();
+  const rename = element("button", "", "重命名");
+  rename.type = "button";
+  rename.addEventListener("click", () => { menu.hidden = true; openRename(kind, id, title); });
+  const remove = element("button", "danger", "删除");
+  remove.type = "button";
+  remove.addEventListener("click", () => { menu.hidden = true; openDelete(kind, id, title); });
+  menu.append(rename, remove);
+  menu.hidden = false;
+  const rect = anchor.getBoundingClientRect();
+  menu.style.left = `${Math.max(6, Math.min(rect.left, window.innerWidth - 160))}px`;
+  menu.style.top = `${rect.bottom + 4}px`;
+  if (rect.bottom + 88 > window.innerHeight) menu.style.top = `${rect.top - 84}px`;
+}
+
+function openDelete(kind, id, title) {
+  deleteTarget = { kind, id, title };
+  ui.deleteName.textContent = title;
+  ui.deleteDescription.textContent = kind === "project"
+    ? "删除项目后，其中的对话会保留并移到「未选择工作目录」，本地文件不受影响。"
+    : "删除后这段对话及其记录将无法恢复，本地文件不受影响。";
+  ui.deleteDialog.showModal();
+}
+
+async function submitDelete(event) {
+  event.preventDefault();
+  if (!deleteTarget) return;
+  const base = deleteTarget.kind === "project" ? "projects" : "conversations";
+  const wasProject = deleteTarget.kind === "project";
+  try {
+    await api(`/api/${base}/${deleteTarget.id}`, { method: "DELETE" });
+    deleteTarget = null;
+    ui.deleteDialog.close();
+    closeDiff();
+    toast(wasProject ? "项目已删除，对话已保留" : "对话已删除");
+    await refresh(false);
+  } catch (error) { toast(error.message); }
+}
+
 function openSettings() {
   const settings = state.settings;
   document.querySelector("#setting-api-key").value = "";
@@ -320,7 +379,7 @@ document.querySelector("#add-project").addEventListener("click", () => openWorks
 document.querySelector("#workspace-button").addEventListener("click", () => openWorkspace("task"));
 document.querySelector("#composer-workspace").addEventListener("click", () => openWorkspace("task"));
 document.querySelector("#open-settings").addEventListener("click", openSettings);
-document.querySelector("#rename-current").addEventListener("click", () => { const task = currentTask(); if (task) openRename("task", task.id, task.title); });
+document.querySelector("#rename-current").addEventListener("click", (event) => { const task = currentTask(); if (task) openItemMenu("task", task.id, task.title, event.currentTarget); });
 document.querySelector("#close-diff").addEventListener("click", closeDiff);
 document.querySelector("#open-sidebar").addEventListener("click", openSidebar);
 document.querySelector("#close-sidebar").addEventListener("click", closeSidebar);
@@ -331,6 +390,7 @@ document.querySelector("#deny-command").addEventListener("click", () => resolveA
 ui.workspaceForm.addEventListener("submit", submitWorkspace);
 ui.composer.addEventListener("submit", sendMessage);
 ui.renameForm.addEventListener("submit", submitRename);
+ui.deleteForm.addEventListener("submit", submitDelete);
 ui.settingsForm.addEventListener("submit", saveSettings);
 ui.input.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); ui.composer.requestSubmit(); }

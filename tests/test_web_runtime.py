@@ -190,3 +190,65 @@ def test_review_command_waits_for_browser_decision_and_continues_after_rejection
     assert "pip install" in approval["command"]
     assert completed["entries"][-1]["text"] == "已尊重拒绝决定。"
     assert any("用户未批准命令" in entry["text"] for entry in completed["entries"] if entry["kind"] == "error")
+
+
+def test_remove_project_moves_conversations_to_projectless_and_keeps_files(tmp_path: Path) -> None:
+    runtime = WebRuntime(settings(tmp_path), tmp_path, model_factory=lambda: ScriptedModel([]))
+    project = runtime.add_project(str(tmp_path))
+    task = runtime.new_conversation(project["id"])
+    keep = tmp_path / "keep.txt"
+    keep.write_text("do not touch", encoding="utf-8")
+
+    runtime.remove_project(project["id"])
+
+    state = runtime.snapshot()
+    assert state["projects"] == []
+    surviving = next(item for item in state["tasks"] if item["id"] == task["id"])
+    assert surviving["project_id"] is None
+    assert keep.read_text(encoding="utf-8") == "do not touch"
+
+
+def test_remove_conversation_deletes_only_that_conversation(tmp_path: Path) -> None:
+    runtime = WebRuntime(settings(tmp_path), tmp_path, model_factory=lambda: ScriptedModel([]))
+    first = runtime.new_conversation()
+    second = runtime.new_conversation()
+
+    runtime.remove_conversation(first["id"])
+
+    state = runtime.snapshot()
+    assert [item["id"] for item in state["tasks"]] == [second["id"]]
+
+
+def test_remove_running_conversation_is_rejected(tmp_path: Path) -> None:
+    class BlockingModel:
+        def complete(self, messages: Sequence[Message], tools: Sequence[dict[str, Any]] | None = None) -> AssistantResponse:
+            time.sleep(0.2)
+            return AssistantResponse("done")
+
+    runtime = WebRuntime(settings(tmp_path), tmp_path, model_factory=BlockingModel)
+    task = runtime.new_conversation()
+    runtime.send_message(task["id"], "run")
+
+    with pytest.raises(RuntimeConflict, match="正在运行"):
+        runtime.remove_conversation(task["id"])
+
+    runtime.cancel(task["id"])
+    wait_until_idle(runtime, task["id"])
+
+
+def test_remove_project_with_running_conversation_is_rejected(tmp_path: Path) -> None:
+    class BlockingModel:
+        def complete(self, messages: Sequence[Message], tools: Sequence[dict[str, Any]] | None = None) -> AssistantResponse:
+            time.sleep(0.2)
+            return AssistantResponse("done")
+
+    runtime = WebRuntime(settings(tmp_path), tmp_path, model_factory=BlockingModel)
+    project = runtime.add_project(str(tmp_path))
+    task = runtime.new_conversation(project["id"])
+    runtime.send_message(task["id"], "run")
+
+    with pytest.raises(RuntimeConflict, match="运行"):
+        runtime.remove_project(project["id"])
+
+    runtime.cancel(task["id"])
+    wait_until_idle(runtime, task["id"])

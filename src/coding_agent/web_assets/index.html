@@ -39,7 +39,7 @@
           <div class="title-line"><h1 id="conversation-title">新对话</h1><span id="run-status" class="status-pill">就绪</span></div>
           <button id="workspace-button" class="workspace-button" type="button">尚未选择工作目录</button>
         </div>
-        <button id="rename-current" class="icon-button" type="button" aria-label="重命名当前对话">•••</button>
+        <button id="rename-current" class="icon-button" type="button" aria-label="对话菜单">•••</button>
       </header>
       <section id="transcript" class="transcript" aria-live="polite" aria-label="对话消息"></section>
       <section id="empty-state" class="empty-state">
@@ -106,6 +106,14 @@
       <header><div><small>显示名称</small><h2>重命名</h2></div><button class="icon-button dialog-close" type="button" aria-label="关闭">×</button></header>
       <label for="rename-value">名称</label><input id="rename-value" maxlength="80" required>
       <div class="dialog-actions"><button class="quiet-button dialog-close" type="button">取消</button><button class="primary-button" type="submit">保存名称</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="delete-dialog">
+    <form id="delete-form" class="dialog-card">
+      <header><div><small>删除</small><h2>删除「<span id="delete-name"></span>」？</h2></div><button class="icon-button dialog-close" type="button" aria-label="关闭">×</button></header>
+      <p id="delete-description"></p>
+      <div class="dialog-actions"><button class="quiet-button dialog-close" type="button">取消</button><button class="danger-button" type="submit">删除</button></div>
     </form>
   </dialog>
 

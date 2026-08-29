@@ -45,6 +45,7 @@ def test_page_has_navigation_conversation_diff_and_native_dialog_landmarks() -> 
         "diff-panel",
         "approval-dialog",
         "settings-dialog",
+        "delete-dialog",
     }.issubset(parser.ids)
     assert parser.styles == 0
     assert parser.scripts == [{"src": "/assets/app.js", "defer": None}]
@@ -66,3 +67,11 @@ def test_assets_contain_no_remote_urls_or_secret_values() -> None:
     assert "https://" not in combined
     assert "http://" not in combined
     assert re.search(r"\bsk-[A-Za-z0-9_-]{12,}", combined) is None
+
+
+def test_frontend_exposes_delete_for_projects_and_conversations() -> None:
+    html = asset("index.html")
+    js = asset("app.js")
+
+    assert 'id="delete-dialog"' in html
+    assert 'method: "DELETE"' in js
