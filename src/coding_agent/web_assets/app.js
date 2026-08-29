@@ -1,0 +1,351 @@
+"use strict";
+
+const ui = {
+  shell: document.querySelector("#app"), projectList: document.querySelector("#project-list"),
+  taskList: document.querySelector("#task-list"), title: document.querySelector("#conversation-title"),
+  status: document.querySelector("#run-status"), workspace: document.querySelector("#workspace-button"),
+  transcript: document.querySelector("#transcript"), empty: document.querySelector("#empty-state"),
+  composer: document.querySelector("#composer-form"), input: document.querySelector("#message-input"),
+  send: document.querySelector("#send-message"), stop: document.querySelector("#stop-task"),
+  connection: document.querySelector("#connection-label"), diffPanel: document.querySelector("#diff-panel"),
+  diffPath: document.querySelector("#diff-path"), diffCounts: document.querySelector("#diff-counts"),
+  diffWarning: document.querySelector("#diff-warning"), diffContent: document.querySelector("#diff-content"),
+  workspaceDialog: document.querySelector("#workspace-dialog"), workspaceForm: document.querySelector("#workspace-form"),
+  workspacePath: document.querySelector("#workspace-path"), workspaceTitle: document.querySelector("#workspace-dialog-title"),
+  workspaceKicker: document.querySelector("#workspace-dialog-kicker"), settingsDialog: document.querySelector("#settings-dialog"),
+  settingsForm: document.querySelector("#settings-form"), renameDialog: document.querySelector("#rename-dialog"),
+  renameForm: document.querySelector("#rename-form"), renameValue: document.querySelector("#rename-value"),
+  approvalDialog: document.querySelector("#approval-dialog"), approvalReason: document.querySelector("#approval-reason"),
+  approvalCommand: document.querySelector("#approval-command"), toast: document.querySelector("#toast"),
+};
+
+let state = { projects: [], tasks: [], approvals: [], settings: {}, current_id: null };
+let workspaceMode = "project";
+let renameTarget = null;
+let shownApproval = null;
+let lastTranscriptKey = "";
+let toastTimer = null;
+
+function element(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+async function api(path, options = {}) {
+  const request = { method: options.method || "GET", headers: {} };
+  if (options.body !== undefined) {
+    request.headers["Content-Type"] = "application/json";
+    request.body = JSON.stringify(options.body);
+  }
+  const response = await fetch(path, request);
+  const raw = await response.text();
+  let data = {};
+  if (raw) {
+    try { data = JSON.parse(raw); } catch { throw new Error("本机服务返回了无法解析的内容"); }
+  }
+  if (!response.ok) throw new Error(data.error || `请求失败 (${response.status})`);
+  return data;
+}
+
+function toast(message) {
+  ui.toast.textContent = message;
+  ui.toast.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { ui.toast.hidden = true; }, 3500);
+}
+
+function currentTask() { return state.tasks.find((task) => task.id === state.current_id) || state.tasks[0] || null; }
+function currentProject() {
+  const task = currentTask();
+  return task ? state.projects.find((project) => project.id === task.project_id) || null : null;
+}
+
+function taskNode(task) {
+  const item = element("div", `task-item${task.id === state.current_id ? " active" : ""}${task.running ? " running" : ""}`);
+  const select = element("button", "task-select", task.title);
+  select.type = "button";
+  select.title = task.title;
+  select.addEventListener("click", () => selectTask(task.id));
+  const menu = element("button", "mini-menu", "•••");
+  menu.type = "button";
+  menu.setAttribute("aria-label", `重命名对话 ${task.title}`);
+  menu.addEventListener("click", () => openRename("task", task.id, task.title));
+  item.append(select, menu);
+  return item;
+}
+
+function renderSidebar() {
+  ui.projectList.replaceChildren();
+  ui.taskList.replaceChildren();
+  for (const project of state.projects) {
+    const group = element("section", "project-group");
+    const heading = element("div", "project-title");
+    const name = element("span", "", project.title);
+    name.title = project.path;
+    const menu = element("button", "mini-menu", "•••");
+    menu.type = "button";
+    menu.setAttribute("aria-label", `重命名项目 ${project.title}`);
+    menu.addEventListener("click", () => openRename("project", project.id, project.title));
+    heading.append(name, menu);
+    const tasks = element("div", "task-list");
+    for (const task of state.tasks.filter((item) => item.project_id === project.id)) tasks.append(taskNode(task));
+    group.append(heading, tasks);
+    ui.projectList.append(group);
+  }
+  for (const task of state.tasks.filter((item) => !item.project_id)) ui.taskList.append(taskNode(task));
+}
+
+function messageNode(entry) {
+  const article = element("article", `message ${entry.kind}`);
+  const labels = { assistant: "小码", tool: "本地工具", error: "运行错误", system: "系统" };
+  article.append(element("p", "message-label", labels[entry.kind] || "你"));
+  article.append(element("div", "message-body", entry.text));
+  if (entry.change_paths && entry.change_paths.length) {
+    const summary = element("div", "change-summary");
+    summary.append(element("p", "change-summary-title", `本轮改动 · ${entry.change_paths.length} 个文件`));
+    for (const path of entry.change_paths) {
+      const card = element("button", "change-card");
+      card.type = "button";
+      card.append(element("span", "change-icon", "▤"), element("span", "change-path", path), element("span", "", "打开 →"));
+      card.addEventListener("click", () => openDiff(path));
+      summary.append(card);
+    }
+    article.append(summary);
+  }
+  return article;
+}
+
+function renderConversation() {
+  const task = currentTask();
+  if (!task) {
+    ui.title.textContent = "新对话"; ui.status.textContent = "就绪";
+    ui.workspace.textContent = "尚未选择工作目录"; ui.empty.hidden = false;
+    ui.transcript.replaceChildren(); ui.send.disabled = false; ui.stop.hidden = true;
+    return;
+  }
+  ui.title.textContent = task.title;
+  ui.status.textContent = task.status;
+  ui.status.classList.toggle("running", task.running);
+  ui.workspace.textContent = task.workspace || "尚未选择工作目录";
+  ui.workspace.title = task.workspace || "为这段对话选择工作目录";
+  ui.send.disabled = task.running;
+  ui.stop.hidden = !task.running;
+  ui.empty.hidden = task.entries.length > 0;
+  const last = task.entries.length ? task.entries[task.entries.length - 1].text : "";
+  const key = `${task.id}:${task.entries.length}:${last}:${task.running}`;
+  if (key !== lastTranscriptKey) {
+    ui.transcript.replaceChildren(...task.entries.map(messageNode));
+    ui.transcript.scrollTop = ui.transcript.scrollHeight;
+    lastTranscriptKey = key;
+  }
+}
+
+function renderSettingsStatus() {
+  ui.connection.textContent = state.settings.api_key_configured
+    ? `${state.settings.model || "模型"} · 凭据已配置`
+    : "需要配置 API Key";
+}
+
+function renderApproval() {
+  const approval = state.approvals[0];
+  if (!approval) {
+    shownApproval = null;
+    if (ui.approvalDialog.open) ui.approvalDialog.close();
+    return;
+  }
+  if (approval.id === shownApproval) return;
+  shownApproval = approval.id;
+  ui.approvalReason.textContent = `${approval.reason} · 风险级别 ${approval.risk}`;
+  ui.approvalCommand.textContent = approval.command;
+  if (!ui.approvalDialog.open) ui.approvalDialog.showModal();
+}
+
+function render() { renderSidebar(); renderConversation(); renderSettingsStatus(); renderApproval(); }
+
+async function refresh(silent = true) {
+  try {
+    state = await api("/api/state");
+    if (!state.current_id && state.tasks.length) state.current_id = state.tasks[0].id;
+    render();
+  } catch (error) {
+    if (!silent) toast(error.message);
+    ui.connection.textContent = "本机服务连接失败";
+  }
+}
+
+async function selectTask(taskId) {
+  try {
+    await api(`/api/conversations/${taskId}/select`, { method: "POST", body: {} });
+    closeSidebar(); closeDiff(); await refresh(false);
+  } catch (error) { toast(error.message); }
+}
+
+async function newConversation() {
+  const project = currentProject();
+  try {
+    const data = await api("/api/conversations", { method: "POST", body: { project_id: project ? project.id : null } });
+    state.current_id = data.task.id;
+    closeSidebar(); closeDiff(); await refresh(false); ui.input.focus();
+  } catch (error) { toast(error.message); }
+}
+
+function openWorkspace(mode) {
+  workspaceMode = mode;
+  const task = currentTask();
+  ui.workspaceKicker.textContent = mode === "project" ? "本机项目" : "当前对话";
+  ui.workspaceTitle.textContent = mode === "project" ? "添加项目" : "选择工作目录";
+  ui.workspacePath.value = mode === "task" && task && task.workspace ? task.workspace : "";
+  ui.workspaceDialog.showModal();
+  ui.workspacePath.focus();
+}
+
+async function submitWorkspace(event) {
+  event.preventDefault();
+  const path = ui.workspacePath.value.trim();
+  try {
+    if (workspaceMode === "project") {
+      const projectData = await api("/api/projects", { method: "POST", body: { path } });
+      const taskData = await api("/api/conversations", { method: "POST", body: { project_id: projectData.project.id } });
+      state.current_id = taskData.task.id;
+    } else {
+      const task = currentTask();
+      if (!task) throw new Error("请先新建对话");
+      await api(`/api/conversations/${task.id}/workspace`, { method: "POST", body: { path } });
+    }
+    ui.workspaceDialog.close(); await refresh(false);
+  } catch (error) { toast(error.message); }
+}
+
+async function sendMessage(event) {
+  event.preventDefault();
+  let task = currentTask();
+  const content = ui.input.value.trim();
+  if (!content) return;
+  try {
+    if (!task) {
+      const created = await api("/api/conversations", { method: "POST", body: {} });
+      task = created.task; state.current_id = task.id;
+    }
+    await api(`/api/conversations/${task.id}/messages`, { method: "POST", body: { content } });
+    ui.input.value = ""; await refresh(false);
+  } catch (error) { toast(error.message); }
+}
+
+async function stopTask() {
+  const task = currentTask();
+  if (!task) return;
+  try { await api(`/api/conversations/${task.id}/cancel`, { method: "POST", body: {} }); await refresh(false); }
+  catch (error) { toast(error.message); }
+}
+
+async function openDiff(path) {
+  const task = currentTask();
+  if (!task) return;
+  try {
+    const data = await api(`/api/conversations/${task.id}/changes/${encodeURIComponent(path)}`);
+    const change = data.change;
+    ui.diffPath.textContent = change.path; ui.diffPath.title = change.path;
+    ui.diffCounts.replaceChildren(element("b", "", `+${change.added}`), element("i", "", `−${change.deleted}`));
+    ui.diffWarning.hidden = !change.warning; ui.diffWarning.textContent = change.warning || "";
+    ui.diffContent.replaceChildren(...change.rows.map(diffRow));
+    ui.shell.classList.add("diff-open"); ui.diffPanel.setAttribute("aria-hidden", "false");
+  } catch (error) { toast(error.message); }
+}
+
+function diffRow(row) {
+  const line = element("div", `diff-row ${row.kind}`);
+  line.setAttribute("role", "row");
+  if (["hunk", "segment", "warning"].includes(row.kind)) { line.textContent = row.text; return line; }
+  const marker = row.kind === "added" ? "+" : row.kind === "removed" ? "−" : " ";
+  line.append(element("span", "line", row.old_line ?? ""), element("span", "line", row.new_line ?? ""), element("span", "marker", marker), element("span", "code", row.text));
+  return line;
+}
+
+function closeDiff() { ui.shell.classList.remove("diff-open"); ui.diffPanel.setAttribute("aria-hidden", "true"); }
+function openRename(kind, id, title) {
+  renameTarget = { kind, id }; ui.renameValue.value = title; ui.renameDialog.showModal(); ui.renameValue.select();
+}
+async function submitRename(event) {
+  event.preventDefault();
+  if (!renameTarget) return;
+  const base = renameTarget.kind === "project" ? "projects" : "conversations";
+  try {
+    await api(`/api/${base}/${renameTarget.id}`, { method: "PATCH", body: { title: ui.renameValue.value } });
+    ui.renameDialog.close(); await refresh(false);
+  } catch (error) { toast(error.message); }
+}
+
+function openSettings() {
+  const settings = state.settings;
+  document.querySelector("#setting-api-key").value = "";
+  document.querySelector("#setting-model").value = settings.model || "";
+  document.querySelector("#setting-base-url").value = settings.base_url || "";
+  document.querySelector("#setting-context").value = settings.context_tokens || 32000;
+  document.querySelector("#setting-steps").value = settings.max_steps || 20;
+  document.querySelector("#setting-approval").value = settings.approval_mode || "ask";
+  document.querySelector("#setting-remember").checked = Boolean(settings.remember_key);
+  ui.settingsDialog.showModal();
+}
+
+async function saveSettings(event) {
+  event.preventDefault();
+  const form = new FormData(ui.settingsForm);
+  const body = {
+    api_key: String(form.get("api_key") || ""), model: String(form.get("model") || ""),
+    base_url: String(form.get("base_url") || ""), context_tokens: Number(form.get("context_tokens")),
+    max_steps: Number(form.get("max_steps")), approval_mode: String(form.get("approval_mode") || "ask"),
+    remember_key: form.get("remember_key") === "on",
+  };
+  try {
+    await api("/api/settings", { method: "POST", body });
+    ui.settingsDialog.close(); toast("设置已保存到本机"); await refresh(false);
+  } catch (error) { toast(error.message); }
+}
+
+async function resolveApproval(approved) {
+  if (!shownApproval) return;
+  try {
+    await api(`/api/approvals/${shownApproval}`, { method: "POST", body: { approved } });
+    ui.approvalDialog.close(); shownApproval = null; await refresh(false);
+  } catch (error) { toast(error.message); }
+}
+
+function openSidebar() { document.body.classList.add("sidebar-open"); }
+function closeSidebar() { document.body.classList.remove("sidebar-open"); }
+
+document.querySelector("#new-conversation").addEventListener("click", newConversation);
+document.querySelector("#add-project").addEventListener("click", () => openWorkspace("project"));
+document.querySelector("#workspace-button").addEventListener("click", () => openWorkspace("task"));
+document.querySelector("#composer-workspace").addEventListener("click", () => openWorkspace("task"));
+document.querySelector("#open-settings").addEventListener("click", openSettings);
+document.querySelector("#rename-current").addEventListener("click", () => { const task = currentTask(); if (task) openRename("task", task.id, task.title); });
+document.querySelector("#close-diff").addEventListener("click", closeDiff);
+document.querySelector("#open-sidebar").addEventListener("click", openSidebar);
+document.querySelector("#close-sidebar").addEventListener("click", closeSidebar);
+document.querySelector("#sidebar-scrim").addEventListener("click", closeSidebar);
+document.querySelector("#stop-task").addEventListener("click", stopTask);
+document.querySelector("#approve-command").addEventListener("click", () => resolveApproval(true));
+document.querySelector("#deny-command").addEventListener("click", () => resolveApproval(false));
+ui.workspaceForm.addEventListener("submit", submitWorkspace);
+ui.composer.addEventListener("submit", sendMessage);
+ui.renameForm.addEventListener("submit", submitRename);
+ui.settingsForm.addEventListener("submit", saveSettings);
+ui.input.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); ui.composer.requestSubmit(); }
+});
+for (const button of document.querySelectorAll("#suggestions button")) {
+  button.addEventListener("click", () => { ui.input.value = button.textContent; ui.input.focus(); });
+}
+for (const button of document.querySelectorAll(".dialog-close")) {
+  button.addEventListener("click", () => button.closest("dialog").close());
+}
+
+refresh(false).then(async () => {
+  if (!state.tasks.length) {
+    try { await api("/api/conversations", { method: "POST", body: {} }); await refresh(false); }
+    catch (error) { toast(error.message); }
+  }
+});
+setInterval(() => refresh(true), 700);

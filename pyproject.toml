@@ -20,13 +20,14 @@ dev = [
 ]
 
 [project.scripts]
+coding-agent = "coding_agent.web:main"
 coding-agent-cli = "coding_agent.cli:main"
-
-[project.gui-scripts]
-coding-agent = "coding_agent.gui:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+coding_agent = ["web_assets/*"]
 
 [tool.pytest.ini_options]
 addopts = "-q"

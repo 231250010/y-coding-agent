@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>小码 · 本地代码工作台</title>
+  <link rel="stylesheet" href="/assets/app.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+  <div id="app" class="shell">
+    <nav id="sidebar" class="sidebar" aria-label="项目与对话">
+      <header class="brand">
+        <span class="brand-mark" aria-hidden="true">◕‿◕</span>
+        <span class="brand-copy"><strong>小码</strong><small>LOCAL CODING AGENT</small></span>
+        <button id="close-sidebar" class="icon-button mobile-only" type="button" aria-label="关闭项目栏">×</button>
+      </header>
+      <div class="rail-heading"><span>工作区</span><button id="add-project" class="rail-link" type="button">＋ 添加项目</button></div>
+      <button id="new-conversation" class="new-task" type="button">＋&nbsp; 开始新对话</button>
+      <div class="project-scroll">
+        <section id="project-list" aria-label="项目列表"></section>
+        <section class="project-group projectless-group">
+          <div class="project-title"><span>未选择工作目录</span></div>
+          <div id="task-list" class="task-list" aria-label="未绑定项目的对话"></div>
+        </section>
+      </div>
+      <footer class="rail-footer">
+        <button id="open-settings" class="rail-settings" type="button"><span aria-hidden="true">⚙</span><span>模型与运行设置</span></button>
+        <p id="connection-label">正在读取本机配置…</p>
+      </footer>
+    </nav>
+
+    <button id="sidebar-scrim" class="sidebar-scrim" type="button" aria-label="关闭项目栏"></button>
+    <main class="conversation" aria-label="当前对话">
+      <header class="conversation-header">
+        <button id="open-sidebar" class="icon-button mobile-only" type="button" aria-label="打开项目栏">☰</button>
+        <div class="conversation-heading">
+          <div class="title-line"><h1 id="conversation-title">新对话</h1><span id="run-status" class="status-pill">就绪</span></div>
+          <button id="workspace-button" class="workspace-button" type="button">尚未选择工作目录</button>
+        </div>
+        <button id="rename-current" class="icon-button" type="button" aria-label="重命名当前对话">•••</button>
+      </header>
+      <section id="transcript" class="transcript" aria-live="polite" aria-label="对话消息"></section>
+      <section id="empty-state" class="empty-state">
+        <span class="empty-mark" aria-hidden="true">⌁</span>
+        <h2>今天想让小码做点什么？</h2>
+        <p>说清目标，剩下的交给我慢慢理顺。</p>
+        <div id="suggestions" class="suggestions">
+          <button type="button">修复失败的测试，并解释原因</button>
+          <button type="button">读懂这个项目，告诉我从哪里开始</button>
+          <button type="button">优化当前代码，但不要改变功能</button>
+        </div>
+      </section>
+      <form id="composer-form" class="composer">
+        <label class="sr-only" for="message-input">输入编程任务</label>
+        <textarea id="message-input" rows="3" maxlength="100000" placeholder="交给小码一个编程任务…"></textarea>
+        <div class="composer-actions">
+          <button id="composer-workspace" class="quiet-button" type="button">＋ 工作目录</button>
+          <span class="shortcut">Enter 发送 · Shift+Enter 换行</span>
+          <button id="stop-task" class="stop-button" type="button" hidden>停止</button>
+          <button id="send-message" class="send-button" type="submit">发送 <span aria-hidden="true">↑</span></button>
+        </div>
+      </form>
+    </main>
+
+    <aside id="diff-panel" class="diff-panel" aria-label="文件改动审查" aria-hidden="true">
+      <header class="diff-header">
+        <div><p>当前对话累计改动</p><h2 id="diff-path">选择一个文件</h2></div>
+        <div class="diff-header-actions"><span id="diff-counts" class="diff-counts"><b>+0</b><i>−0</i></span><button id="close-diff" class="icon-button" type="button" aria-label="关闭文件改动">×</button></div>
+      </header>
+      <p id="diff-warning" class="diff-warning" hidden></p>
+      <div id="diff-content" class="diff-content" role="table" aria-label="行级文件差异"></div>
+    </aside>
+  </div>
+
+  <dialog id="workspace-dialog">
+    <form id="workspace-form" class="dialog-card">
+      <header><div><small id="workspace-dialog-kicker">本机目录</small><h2 id="workspace-dialog-title">添加项目</h2></div><button class="icon-button dialog-close" type="button" aria-label="关闭">×</button></header>
+      <p>输入这台电脑上已经存在的绝对目录。目录内容不会上传到本服务。</p>
+      <label for="workspace-path">工作目录</label>
+      <input id="workspace-path" name="path" autocomplete="off" placeholder="C:\Users\name\project" required>
+      <div class="dialog-actions"><button class="quiet-button dialog-close" type="button">取消</button><button class="primary-button" type="submit">使用此目录</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="settings-dialog">
+    <form id="settings-form" class="dialog-card settings-card">
+      <header><div><small>本机配置</small><h2>模型与运行设置</h2></div><button class="icon-button dialog-close" type="button" aria-label="关闭">×</button></header>
+      <p>API Key 不会返回浏览器。留空表示继续使用当前环境变量或本地配置。</p>
+      <div class="field-grid">
+        <label for="setting-api-key">API Key</label><input id="setting-api-key" name="api_key" type="password" autocomplete="off" placeholder="留空以保持当前凭据">
+        <label for="setting-model">模型</label><input id="setting-model" name="model" required>
+        <label for="setting-base-url">Base URL</label><input id="setting-base-url" name="base_url" required>
+        <label for="setting-context">上下文预算</label><input id="setting-context" name="context_tokens" type="number" min="1" required>
+        <label for="setting-steps">最大步骤</label><input id="setting-steps" name="max_steps" type="number" min="1" required>
+        <label for="setting-approval">命令审批</label><select id="setting-approval" name="approval_mode"><option value="ask">按风险询问</option><option value="always">每次询问</option></select>
+      </div>
+      <label class="check-row"><input id="setting-remember" name="remember_key" type="checkbox"><span>将新 API Key 保存到 Git 忽略的本地配置</span></label>
+      <div class="dialog-actions"><button class="quiet-button dialog-close" type="button">取消</button><button class="primary-button" type="submit">保存设置</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="rename-dialog">
+    <form id="rename-form" class="dialog-card compact-card">
+      <header><div><small>显示名称</small><h2>重命名</h2></div><button class="icon-button dialog-close" type="button" aria-label="关闭">×</button></header>
+      <label for="rename-value">名称</label><input id="rename-value" maxlength="80" required>
+      <div class="dialog-actions"><button class="quiet-button dialog-close" type="button">取消</button><button class="primary-button" type="submit">保存名称</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="approval-dialog">
+    <form id="approval-form" class="dialog-card approval-card">
+      <header><div><small>命令审批</small><h2>允许执行这条命令吗？</h2></div></header>
+      <p id="approval-reason"></p><pre id="approval-command"></pre>
+      <div class="dialog-actions"><button id="deny-command" class="quiet-button" type="button">拒绝</button><button id="approve-command" class="danger-button" type="button">允许执行</button></div>
+    </form>
+  </dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

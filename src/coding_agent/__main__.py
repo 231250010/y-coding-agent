@@ -1,4 +1,4 @@
-from .gui import main
+from .web import main
 
 
 if __name__ == "__main__":
