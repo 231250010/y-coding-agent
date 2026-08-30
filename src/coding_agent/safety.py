@@ -22,7 +22,9 @@ class CommandPolicy:
     """Conservative application-level command classifier, not an OS sandbox."""
 
     _destructive = re.compile(
-        r"(?i)(git\b[^\r\n;&|]*?\b(reset\s+--hard|clean\s+-[^\s]*f)|"
+        r"(?i)(git\b[^\r\n;&|]*?\bpush\b[^\r\n;&|]*(?:"
+        r"--force(?:-with-lease|-if-includes)?\b|\s-f(?:\s|$)|--delete\b|\s:\S+)|"
+        r"git\b[^\r\n;&|]*?\b(reset\s+--hard|clean\s+-[^\s]*f)|"
         r"shutdown|reboot|restart-computer|stop-computer|format(?:\.com)?\b|diskpart\b|"
         r"reg\s+delete|set-executionpolicy|sudo\b|runas\b)"
     )

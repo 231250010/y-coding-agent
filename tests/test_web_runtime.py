@@ -139,6 +139,7 @@ def test_net_zero_temporary_file_is_removed_from_pending_changes(tmp_path: Path)
     assert task.pending_change_paths == []
 
 
+
 def test_restored_entries_hide_paths_without_a_remaining_diff(tmp_path: Path) -> None:
     runtime = WebRuntime(settings(tmp_path), tmp_path, model_factory=lambda: ScriptedModel([]))
     project = runtime.add_project(str(tmp_path))

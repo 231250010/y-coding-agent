@@ -24,7 +24,7 @@ def pick_directory(initial: str | None, *, runner: Runner = subprocess.run) -> s
     """Open the OS directory picker in an isolated process.
 
     Tk must own the main thread on Windows. Running the dialog in a small child
-    process also keeps GUI state out of the threaded local HTTP server.
+    process also keeps Tk state out of the threaded local HTTP server.
     """
 
     command = [sys.executable, "-m", "coding_agent.directory_picker", "--child"]

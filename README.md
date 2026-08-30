@@ -15,7 +15,7 @@
 - 不使用 Code Interpreter、Files API、File Search、Computer Use 等服务端托管工具。
 - 文件访问、命令执行、参数验证、tool call 回传、上下文管理和循环终止全部发生在本机。
 
-网页服务也没有引入 Web 框架：它使用 Python 标准库 `ThreadingHTTPServer`，前端使用原生 HTML、CSS 和 JavaScript。运行依赖为基础客户端 `openai`、终端展示库 `rich`，以及为系统 SOCKS 代理提供传输支持的 `httpx[socks]`；它们都不承担 Agent 编排职责。
+网页服务也没有引入 Web 框架：它使用 Python 标准库 `ThreadingHTTPServer`，前端使用原生 HTML、CSS 和 JavaScript。运行依赖为基础客户端 `openai`，以及为系统 SOCKS 代理提供传输支持的 `httpx[socks]`；它们都不承担 Agent 编排职责。
 
 ## 工作原理
 
@@ -58,7 +58,6 @@
 - `web_assets/`：浏览器界面，不执行文件或命令工具。
 - `changes.py`：对话级文件快照、变更追踪和 Diff 数据。
 - `session_store.py`：被 Git 忽略的本机会话存储。
-- `cli.py`：备用终端入口，不是默认产品界面。
 
 ## 安装
 
@@ -119,12 +118,6 @@ python -m coding_agent --no-browser
 
 网页服务固定绑定 `127.0.0.1`，不能改成局域网或公网地址。若关闭了自动打开浏览器，请在服务启动后手动访问终端显示的本机地址。
 
-备用 CLI 仍可用于自动化和调试：
-
-```powershell
-coding-agent-cli --workspace C:\path\to\project "检查并修复测试"
-```
-
 ## 网页工作台
 
 - 左侧项目树：一个工作目录对应一个项目，项目下包含该目录中的全部对话。
@@ -148,6 +141,22 @@ coding-agent-cli --workspace C:\path\to\project "检查并修复测试"
 | `write_file` | 创建或覆盖文本文件 | 限制单次内容大小 |
 | `replace_text` | 精确替换文本 | 默认要求唯一匹配 |
 | `run_command` | 执行工作区命令 | 风险分类、确认、超时和输出截断 |
+| `git_status` / `git_diff` | 查询分支、上游、文件状态以及工作区/暂存区 Diff | 只读；支持限定工作区相对路径 |
+| `git_log` / `git_branches` | 查询提交记录与本地分支 | 数量和输出有上限 |
+| `git_create_branch` | 创建并切换本地分支 | 校验 Git 分支名，不覆盖现有分支 |
+| `git_stage` / `git_unstage` | 暂存或取消暂存明确路径 | 不接受工作区外路径，不丢弃工作区内容 |
+| `git_commit` | 提交当前暂存内容 | 不自动暂存；要求单行提交消息 |
+| `git_pull` | 拉取当前分支 | 固定使用 `--ff-only`，不自动合并 |
+| `git_push` | 推送当前分支 | 仅使用已有上游或 `origin/当前分支`，不支持 force/refspec |
+
+常见 Git 工作流使用参数数组直接调用 Git，不经过 Shell。Git 结果使用结构化 JSON 返回，并区分非仓库、无内容可提交、认证失败、远端拒绝、无法快进/冲突和其他失败。`git_pull` 造成的文件变化也会进入当前对话的累计 Diff。
+
+结构化 Git 权限规则：
+
+- `status`、`diff`、`log`、`branches` 在三种模式下均自动执行。
+- 创建分支、暂存、取消暂存和提交在“请求批准”模式询问，在“帮我批准”和“完全访问权限”模式自动执行。
+- `pull`、`push` 在“请求批准”和“帮我批准”模式询问，仅在“完全访问权限”模式自动执行。
+- hard reset、clean、force push 和删除远端引用不属于结构化工具；通用命令的既有破坏性操作拒绝规则继续生效。
 
 工具参数由项目自己的轻量验证器依据 JSON Schema 校验。非法 JSON、缺少参数、未知参数和未知工具都会成为结构化 `tool` 错误结果返回模型，让模型有机会修正调用。
 
@@ -220,5 +229,6 @@ python -m pytest
 - 服务只供本机单用户使用，不提供身份认证或远程部署。
 - 多个工具调用按模型返回顺序串行执行。
 - 只处理 UTF-8 文本文件，不编辑二进制文件。
-- 不自动提交 Git、不提供插件系统或自主网络搜索。
+- 不自动提交 Git；结构化提交只会在模型明确调用且权限规则允许时执行。
+- 暂不提供任务级 Git worktree 隔离、Git 图形操作栏、PR 托管平台集成、merge/rebase 结构化工具、插件系统或自主网络搜索。
 - 不同兼容网关对 Chat Completions tool calling 的实现程度可能不同。

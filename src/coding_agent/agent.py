@@ -6,8 +6,9 @@ from typing import Any
 
 from .context import ContextManager
 from .model import AssistantResponse, ChatModel, Message, ModelError
+from .providers import ToolProvider
 from .prompts import SUMMARY_PROMPT, SYSTEM_PROMPT
-from .tools import ToolRegistry, ToolResult
+from .tools import ToolResult
 
 
 EventCallback = Callable[[str, dict[str, Any]], None]
@@ -25,7 +26,7 @@ class CodingAgent:
     def __init__(
         self,
         model: ChatModel,
-        tools: ToolRegistry,
+        tools: ToolProvider,
         context: ContextManager,
         *,
         max_steps: int = 20,
@@ -81,8 +82,8 @@ class CodingAgent:
                         "ok": result.ok,
                         "output": result.output,
                         "error": result.error,
-                        "changes": result.changes.to_event(self.tools.change_tracker.changes)
-                        if self.tools.change_tracker
+                        "changes": result.changes.to_event(change_tracker.changes)
+                        if (change_tracker := getattr(self.tools, "change_tracker", None))
                         else {"paths": [], "warning": None, "files": []},
                     },
                 )

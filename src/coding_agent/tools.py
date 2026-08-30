@@ -433,7 +433,7 @@ class ToolRegistry:
                     except subprocess.TimeoutExpired:
                         # A restricted Windows environment can prevent taskkill
                         # from closing an inherited child pipe immediately. Do
-                        # not let output collection make the GUI appear frozen.
+                        # not let output collection make the web task appear frozen.
                         process.kill()
                         if process.stdout:
                             process.stdout.close()

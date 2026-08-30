@@ -28,7 +28,17 @@ def test_review_commands(policy: CommandPolicy, command: str) -> None:
 
 @pytest.mark.parametrize(
     "command",
-    ["git reset --hard HEAD", "git clean -fd", "shutdown /s", "sudo rm file", "rm ../outside.txt"],
+    [
+        "git reset --hard HEAD",
+        "git clean -fd",
+        "git push --force origin main",
+        "git push --force-with-lease",
+        "git push origin --delete old",
+        "git push origin :old",
+        "shutdown /s",
+        "sudo rm file",
+        "rm ../outside.txt",
+    ],
 )
 def test_denied_commands(policy: CommandPolicy, command: str) -> None:
     assert policy.classify(command).level == RiskLevel.DENY

@@ -16,7 +16,7 @@ from .permissions import PERMISSION_MODES, normalize_permission_mode
 from .prompts import PROJECTLESS_SYSTEM_PROMPT, SYSTEM_PROMPT
 from .safety import RiskLevel
 from .session_store import SessionStore
-from .tools import ToolRegistry
+from .providers import build_default_tool_provider
 
 
 class RuntimeNotFound(LookupError):
@@ -458,8 +458,8 @@ class WebRuntime:
         project = self._project(task.project_id) if task.project_id else None
         workspace = project.path if project else None
         # Config validates model settings and requires a directory. The settings
-        # root is used only for that validation in projectless chat; ToolRegistry
-        # still receives None, so file and command tools cannot fall back here.
+        # root is used only for that validation in projectless chat; the tool
+        # provider still receives None, so local tools cannot fall back here.
         config = Config.from_values(
             api_key=self.settings.api_key,
             model=self.settings.model,
@@ -476,7 +476,7 @@ class WebRuntime:
             timeout=config.request_timeout,
             max_retries=config.max_retries,
         )
-        tools = ToolRegistry(
+        tools = build_default_tool_provider(
             workspace,
             approver=lambda command, risk, reason: self._request_approval(
                 task.id, command, risk, reason

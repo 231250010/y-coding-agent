@@ -81,6 +81,7 @@ def test_tool_end_exposes_local_changes_without_sending_them_to_model(tmp_path: 
     assert "changes" not in tool_payload
 
 
+
 def test_multiple_tools_are_executed_in_order(tmp_path: Path) -> None:
     responses = [
         AssistantResponse(
