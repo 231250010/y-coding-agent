@@ -407,6 +407,56 @@ require_clean_worktree = true
     assert docker.calls == []
 
 
+def test_release_service_denies_shell_gate_even_when_called_directly(tmp_path: Path) -> None:
+    write_compose(tmp_path)
+    (tmp_path / "coding-agent.toml").write_text(
+        """[devops]
+compose_file = "compose.yaml"
+[devops.release]
+[[devops.release.checks]]
+name = "hidden-shell"
+command = ["powershell", "-Command", "pytest"]
+""",
+        encoding="utf-8",
+    )
+    docker = FakeDockerRunner()
+
+    with pytest.raises(DevOpsOperationError) as caught:
+        DevOpsService(tmp_path, docker).release("v1")
+
+    assert caught.value.code == "release_gate_denied"
+    assert docker.calls == []
+
+
+def test_release_rejects_policy_changed_after_human_preview(tmp_path: Path) -> None:
+    write_compose(tmp_path)
+    config = tmp_path / "coding-agent.toml"
+    config.write_text(
+        """[devops]
+compose_file = "compose.yaml"
+[devops.release]
+[[devops.release.checks]]
+name = "custom"
+command = ["custom-linter", "--strict"]
+""",
+        encoding="utf-8",
+    )
+    docker = FakeDockerRunner()
+    service = DevOpsService(tmp_path, docker)
+    preview = service.release_preview()
+    config.write_text(config.read_text(encoding="utf-8") + "\n# changed after approval\n", encoding="utf-8")
+
+    with pytest.raises(DevOpsOperationError) as caught:
+        service.release(
+            "v1",
+            expected_policy_digest=preview["policy_digest"],
+            allow_review_checks=True,
+        )
+
+    assert caught.value.code == "release_gate_approval_required"
+    assert docker.calls == []
+
+
 def test_release_audits_git_compose_and_required_checks(tmp_path: Path) -> None:
     write_compose(tmp_path)
     (tmp_path / "coding-agent.toml").write_text(

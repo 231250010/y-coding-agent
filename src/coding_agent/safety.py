@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -50,7 +52,7 @@ class CommandPolicy:
         r"type(?:\s|$)|cat(?:\s|$)|head(?:\s|$)|tail(?:\s|$)|"
         r"rg(?:\s|$)|grep(?:\s|$)|findstr(?:\s|$)|"
         r"git\s+(?:status|diff|log|show)(?:\s|$)|"
-        r"pytest(?:\s|$)|python(?:3)?\s+-m\s+(?:pytest|unittest|compileall)(?:\s|$)|"
+        r"pytest(?:\s|$)|python(?:3)?\s+-m\s+(?:pytest|unittest|compileall|py_compile)(?:\s|$)|"
         r"npm\s+(?:test|run\s+(?:test|build|lint))(?:\s|$)|"
         r"pnpm\s+(?:test|run\s+(?:test|build|lint))(?:\s|$)|"
         r"yarn\s+(?:test|run\s+(?:test|build|lint))(?:\s|$)|"
@@ -96,3 +98,74 @@ class CommandPolicy:
         """Return whether a command is in the narrow, known read-only allowlist."""
         stripped = command.strip()
         return not self._shell_composition.search(stripped) and bool(self._read_only.search(stripped))
+
+    def classify_argv(self, command: Sequence[str]) -> CommandDecision:
+        """Classify a shell-free argument vector used by release policy checks."""
+        if (
+            isinstance(command, (str, bytes))
+            or not command
+            or len(command) > 30
+            or any(not isinstance(part, str) or not part for part in command)
+        ):
+            return CommandDecision(RiskLevel.DENY, "门禁命令参数数组无效")
+        if any("\x00" in part or "\n" in part or "\r" in part for part in command):
+            return CommandDecision(RiskLevel.DENY, "门禁命令包含不允许的控制字符")
+
+        executable = Path(command[0]).name.casefold()
+        if executable in {
+            "cmd",
+            "cmd.exe",
+            "powershell",
+            "powershell.exe",
+            "pwsh",
+            "bash",
+            "sh",
+            "zsh",
+            "wsl",
+            "sudo",
+        }:
+            return CommandDecision(RiskLevel.DENY, "发布门禁禁止启动 Shell、提权或子系统解释器")
+        if executable in {"python", "python.exe", "python3", "python3.exe", "py", "py.exe"}:
+            if len(command) >= 3 and command[1] == "-m" and command[2] in {
+                "pytest",
+                "unittest",
+                "compileall",
+                "py_compile",
+            }:
+                return self._argv_path_decision(command)
+            if len(command) >= 2 and command[1] in {"-c", "-"}:
+                return CommandDecision(RiskLevel.DENY, "发布门禁禁止内联 Python 代码")
+            return CommandDecision(RiskLevel.REVIEW, "非标准 Python 检查需要人工确认")
+
+        rendered = subprocess.list2cmdline(list(command))
+        decision = self.classify(rendered)
+        if decision.level is RiskLevel.DENY:
+            return decision
+        if executable in {
+            "pytest",
+            "pytest.exe",
+            "npm",
+            "npm.cmd",
+            "pnpm",
+            "pnpm.cmd",
+            "yarn",
+            "yarn.cmd",
+            "cargo",
+            "cargo.exe",
+            "go",
+            "go.exe",
+            "git",
+            "git.exe",
+        } and decision.level is RiskLevel.SAFE:
+            return self._argv_path_decision(command)
+        return CommandDecision(RiskLevel.REVIEW, "未列入发布门禁安全清单，需要人工确认")
+
+    def _argv_path_decision(self, command: Sequence[str]) -> CommandDecision:
+        executable_path = Path(command[0])
+        if executable_path.parent != Path("."):
+            return CommandDecision(RiskLevel.REVIEW, "门禁命令使用了带路径的可执行文件")
+        for argument in command[1:]:
+            candidate = Path(argument)
+            if ".." in candidate.parts or candidate.is_absolute():
+                return CommandDecision(RiskLevel.REVIEW, "门禁命令可能访问工作区外路径")
+        return CommandDecision(RiskLevel.SAFE, "已识别的测试、构建或只读门禁命令")

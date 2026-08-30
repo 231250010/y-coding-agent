@@ -20,6 +20,7 @@ from urllib import error as urlerror
 from urllib import request as urlrequest
 
 from .release_store import ReleaseStore
+from .safety import CommandPolicy, RiskLevel
 
 
 DevOpsRunner = Callable[[Sequence[str], Path, float], subprocess.CompletedProcess[str]]
@@ -391,16 +392,53 @@ class DevOpsService:
         version: str,
         environment: str | None = None,
         services: Sequence[str] | None = None,
+        *,
+        expected_policy_digest: str | None = None,
+        allow_review_checks: bool = False,
     ) -> dict[str, Any]:
         _config, selected = self._resolve_environment(environment)
         with self._environment_operation(selected, "compose_release"):
-            return self._release_unlocked(version, environment, services)
+            return self._release_unlocked(
+                version,
+                environment,
+                services,
+                expected_policy_digest=expected_policy_digest,
+                allow_review_checks=allow_review_checks,
+            )
+
+    def release_preview(self, environment: str | None = None) -> dict[str, Any]:
+        config, selected = self._resolve_environment(environment)
+        self._require_compose(config)
+        policy = config.release_policy
+        classifier = CommandPolicy(self.workspace)
+        checks = []
+        for check in policy.checks:
+            decision = classifier.classify_argv(check.command)
+            checks.append(
+                {
+                    "name": check.name,
+                    "command": list(check.command),
+                    "timeout_seconds": check.timeout_seconds,
+                    "risk": decision.level.value,
+                    "reason": decision.reason,
+                }
+            )
+        return {
+            "environment": selected.name,
+            "require_git": policy.require_git,
+            "require_clean_worktree": policy.require_clean_worktree,
+            "checks": checks,
+            "policy_digest": self._policy_digest(),
+        }
 
     def _release_unlocked(
         self,
         version: str,
         environment: str | None = None,
         services: Sequence[str] | None = None,
+        *,
+        expected_policy_digest: str | None = None,
+        allow_review_checks: bool = False,
     ) -> dict[str, Any]:
         release_version = self._validate_version(version)
         config, selected = self._resolve_environment(environment)
@@ -416,7 +454,14 @@ class DevOpsService:
         gate: dict[str, Any] = {}
         self._local_progress_step(
             self._step("compose_release", selected, "gate", "执行发布门禁", 1, 6),
-            lambda: gate.update(self._release_gate(config, compose_file)),
+            lambda: gate.update(
+                self._release_gate(
+                    config,
+                    compose_file,
+                    expected_policy_digest=expected_policy_digest,
+                    allow_review_checks=allow_review_checks,
+                )
+            ),
         )
         self._run(
             self._compose_command(selected, compose_file, ["config", "--quiet"]),
@@ -687,15 +732,52 @@ class DevOpsService:
             raise
 
     def _release_gate(
-        self, config: DevOpsProjectConfig, compose_file: Path
+        self,
+        config: DevOpsProjectConfig,
+        compose_file: Path,
+        *,
+        expected_policy_digest: str | None,
+        allow_review_checks: bool,
     ) -> dict[str, Any]:
         policy = config.release_policy
+        current_digest = self._policy_digest()
+        classifier = CommandPolicy(self.workspace)
+        decisions = [classifier.classify_argv(check.command) for check in policy.checks]
+        if (
+            expected_policy_digest is not None
+            and expected_policy_digest != current_digest
+        ):
+            raise DevOpsOperationError(
+                "release_gate_approval_required",
+                "发布确认后 coding-agent.toml 已经变化，请重新预览并确认",
+            )
+        denied = [
+            f"{check.name}: {decision.reason}"
+            for check, decision in zip(policy.checks, decisions)
+            if decision.level is RiskLevel.DENY
+        ]
+        if denied:
+            raise DevOpsOperationError(
+                "release_gate_denied", "发布门禁包含禁止命令: " + "；".join(denied)
+            )
+        review = [
+            f"{check.name}: {decision.reason}"
+            for check, decision in zip(policy.checks, decisions)
+            if decision.level is RiskLevel.REVIEW
+        ]
+        if review and (not allow_review_checks or expected_policy_digest is None):
+            raise DevOpsOperationError(
+                "release_gate_approval_required",
+                "发布门禁包含需要人工确认的命令，或确认后配置已经变化",
+                output=json.dumps(review, ensure_ascii=False),
+            )
         evidence: dict[str, Any] = {
             "evaluated_at": self._now(),
             "compose_sha256": hashlib.sha256(compose_file.read_bytes()).hexdigest(),
             "git": {"available": False, "commit": None, "branch": None, "dirty": None},
             "checks": [],
             "passed": False,
+            "policy_digest": current_digest,
         }
         failures: list[str] = []
         root = self._run_gate_command(["git", "rev-parse", "--show-toplevel"], 15)
@@ -744,6 +826,11 @@ class DevOpsService:
                 output=json.dumps(evidence, ensure_ascii=False, indent=2),
             )
         return evidence
+
+    def _policy_digest(self) -> str:
+        path = self.workspace / "coding-agent.toml"
+        payload = path.read_bytes() if path.is_file() else b"<missing>"
+        return hashlib.sha256(payload).hexdigest()
 
     def _run_gate_command(
         self, command: Sequence[str], timeout: float

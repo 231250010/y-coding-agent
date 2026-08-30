@@ -64,3 +64,44 @@ def test_compound_commands_are_not_treated_as_read_only(policy: CommandPolicy, c
 
 def test_git_global_options_cannot_bypass_destructive_denial(policy: CommandPolicy) -> None:
     assert policy.classify("git -C . reset --hard HEAD~1").level == RiskLevel.DENY
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["python", "-m", "pytest", "-q"],
+        ["python", "-m", "py_compile", "app.py"],
+        ["npm", "run", "build"],
+        ["cargo", "check"],
+    ],
+)
+def test_safe_release_gate_argv(policy: CommandPolicy, command: list[str]) -> None:
+    assert policy.classify_argv(command).level == RiskLevel.SAFE
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["python", "scripts/custom_check.py"],
+        ["custom-linter", "--strict"],
+        ["python", "-m", "pytest", "../outside"],
+    ],
+)
+def test_unknown_release_gate_argv_requires_review(
+    policy: CommandPolicy, command: list[str]
+) -> None:
+    assert policy.classify_argv(command).level == RiskLevel.REVIEW
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["powershell", "-Command", "Get-Content secret.txt"],
+        ["cmd.exe", "/c", "pytest"],
+        ["python", "-c", "print('hidden')"],
+    ],
+)
+def test_dangerous_release_gate_argv_is_denied(
+    policy: CommandPolicy, command: list[str]
+) -> None:
+    assert policy.classify_argv(command).level == RiskLevel.DENY

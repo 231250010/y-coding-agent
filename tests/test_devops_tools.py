@@ -12,6 +12,13 @@ class StubDevOpsService:
     def __init__(self) -> None:
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
         self.failure: DevOpsOperationError | None = None
+        self.release_preview_data: dict[str, Any] = {
+            "environment": "local",
+            "require_git": True,
+            "require_clean_worktree": True,
+            "checks": [],
+            "policy_digest": "d" * 64,
+        }
 
     def _call(self, name: str, *args: Any) -> dict[str, Any]:
         self.calls.append((name, args))
@@ -40,9 +47,27 @@ class StubDevOpsService:
     stop = build
 
     def release(
-        self, version: str, environment: str | None, services: list[str] | None
+        self,
+        version: str,
+        environment: str | None,
+        services: list[str] | None,
+        *,
+        expected_policy_digest: str | None = None,
+        allow_review_checks: bool = False,
     ) -> dict[str, Any]:
-        return self._call("release", version, environment, services)
+        return self._call(
+            "release",
+            version,
+            environment,
+            services,
+            expected_policy_digest,
+            allow_review_checks,
+        )
+
+    def release_preview(self, environment: str | None) -> dict[str, Any]:
+        preview = dict(self.release_preview_data)
+        preview["environment"] = environment or preview["environment"]
+        return preview
 
     def releases(self, environment: str | None, limit: int) -> dict[str, Any]:
         return self._call("releases", environment, limit)
@@ -134,6 +159,113 @@ def test_full_mode_executes_mutation_and_returns_structured_json() -> None:
     assert result.ok is True
     assert json.loads(result.output)["operation"] == "build"
     assert service.calls == [("build", (None, ["web"]))]
+
+
+def test_release_approval_displays_all_gate_commands() -> None:
+    service = StubDevOpsService()
+    service.release_preview_data["checks"] = [
+        {
+            "name": "tests",
+            "command": ["python", "-m", "pytest", "-q"],
+            "risk": "safe",
+            "reason": "已识别",
+        },
+        {
+            "name": "lint",
+            "command": ["npm", "run", "lint"],
+            "risk": "safe",
+            "reason": "已识别",
+        },
+    ]
+    approvals: list[tuple[str, RiskLevel, str]] = []
+    provider = DevOpsToolProvider(
+        service,  # type: ignore[arg-type]
+        approval_mode="risk",
+        approver=lambda *args: approvals.append(args) or False,
+    )
+
+    result = provider.execute("compose_release", {"version": "v1", "environment": "staging"})
+
+    assert result.ok is False
+    assert service.calls == []
+    assert "pytest" in approvals[0][0]
+    assert "npm" in approvals[0][2]
+
+
+def test_unknown_release_check_requires_approval_even_in_full_mode() -> None:
+    service = StubDevOpsService()
+    service.release_preview_data["checks"] = [
+        {
+            "name": "custom",
+            "command": ["custom-linter", "--strict"],
+            "risk": "review",
+            "reason": "未识别",
+        }
+    ]
+    approvals: list[tuple[str, RiskLevel, str]] = []
+    provider = DevOpsToolProvider(
+        service,  # type: ignore[arg-type]
+        approval_mode="full",
+        approver=lambda *args: approvals.append(args) or True,
+    )
+
+    result = provider.execute("compose_release", {"version": "v1"})
+
+    assert result.ok is True
+    assert approvals
+    assert service.calls == [("release", ("v1", None, None, "d" * 64, True))]
+
+
+def test_denied_release_check_never_reaches_approver_or_service() -> None:
+    service = StubDevOpsService()
+    service.release_preview_data["checks"] = [
+        {
+            "name": "shell",
+            "command": ["powershell", "-Command", "pytest"],
+            "risk": "deny",
+            "reason": "禁止 Shell",
+        }
+    ]
+    approvals: list[tuple[str, RiskLevel, str]] = []
+    provider = DevOpsToolProvider(
+        service,  # type: ignore[arg-type]
+        approval_mode="full",
+        approver=lambda *args: approvals.append(args) or True,
+    )
+
+    result = provider.execute("compose_release", {"version": "v1"})
+
+    assert result.ok is False
+    assert "禁止命令" in (result.error or "")
+    assert approvals == []
+    assert service.calls == []
+
+
+def test_full_mode_requires_approval_when_task_changed_release_config() -> None:
+    service = StubDevOpsService()
+    service.release_preview_data["checks"] = [
+        {
+            "name": "tests",
+            "command": ["python", "-m", "pytest", "-q"],
+            "risk": "safe",
+            "reason": "已识别",
+        }
+    ]
+    approvals: list[tuple[str, RiskLevel, str]] = []
+    tracker = type("Tracker", (), {"changes": {"coding-agent.toml": object()}})()
+    provider = DevOpsToolProvider(
+        service,  # type: ignore[arg-type]
+        approval_mode="full",
+        approver=lambda *args: approvals.append(args) or False,
+        change_tracker=tracker,  # type: ignore[arg-type]
+    )
+
+    result = provider.execute("compose_release", {"version": "v1"})
+
+    assert result.ok is False
+    assert approvals
+    assert "修改了 coding-agent.toml" in approvals[0][2]
+    assert service.calls == []
 
 
 def test_rollback_always_requires_human_confirmation_even_in_full_mode() -> None:

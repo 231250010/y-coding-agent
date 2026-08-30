@@ -220,6 +220,8 @@ timeout_seconds = 300
 
 其中 `staging-host` 应由开发者提前使用 `docker context create` 配置。健康验证会在超时范围内等待 Compose healthcheck 从 `starting` 收敛，并在容器就绪后执行可选 HTTP 探针。发布门禁可以强制要求 Git 提交、干净工作区和一组参数数组形式的检查命令。配置只保存 Context 名称，不保存主机密码、私钥、Token 或环境变量值；所有 Docker 和门禁命令都不经过 Shell。
 
+发布确认会完整展示每个门禁检查的名称、参数数组、超时和安全分类。`pytest`、受限的 `python -m pytest/unittest/compileall/py_compile` 以及常见构建命令可以作为已识别检查；Shell、提权解释器和 `python -c` 直接拒绝，其他自定义程序必须人工确认，即使处于 `full` 模式。本次对话修改过 `coding-agent.toml` 时也会强制再次确认。确认绑定配置文件 SHA-256，确认后配置发生变化会以 `release_gate_approval_required` 停止，不会执行 Docker 变更。
+
 推荐在网页中这样下达任务：
 
 > 检查这个项目的测试和 Compose 配置。修复测试失败，展示 Git Diff；部署到 staging 前先做预检，得到批准后部署，并用容器状态和 healthcheck 验证结果。如果失败，读取 web 服务最近 200 行日志并继续诊断。

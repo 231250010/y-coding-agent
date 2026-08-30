@@ -225,10 +225,27 @@ class DevOpsToolProvider:
         if validation_error:
             return ToolResult(False, error=validation_error)
         try:
-            approval_error = self._approve(name, arguments)
+            release_preview = (
+                self.service.release_preview(arguments.get("environment"))
+                if name == "compose_release"
+                else None
+            )
+            approval_error, allow_review_checks = self._approve(
+                name, arguments, release_preview
+            )
             if approval_error:
                 return ToolResult(False, error=approval_error)
-            data = handler(arguments)
+            if name == "compose_release":
+                assert release_preview is not None
+                data = self.service.release(
+                    arguments["version"],
+                    arguments.get("environment"),
+                    arguments.get("services"),
+                    expected_policy_digest=release_preview["policy_digest"],
+                    allow_review_checks=allow_review_checks,
+                )
+            else:
+                data = handler(arguments)
             output = json.dumps(data, ensure_ascii=False, indent=2)
             if len(output) > self.max_output:
                 output = output[: self.max_output] + "\n...输出已截断"
@@ -239,7 +256,15 @@ class DevOpsToolProvider:
                 output = output[: self.max_output] + "\n...输出已截断"
             return ToolResult(False, output=output, error=f"{exc.code}: {exc}")
 
-    def _approve(self, name: str, arguments: dict[str, Any]) -> str | None:
+    def _approve(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        release_preview: dict[str, Any] | None = None,
+    ) -> tuple[str | None, bool]:
+        if name == "compose_release":
+            assert release_preview is not None
+            return self._approve_release(arguments, release_preview)
         if name == "compose_rollback":
             preview = self.service.rollback_preview(arguments["plan_id"])
             label = f"compose_rollback {json.dumps(preview, ensure_ascii=False, separators=(',', ':'))}"
@@ -249,16 +274,60 @@ class DevOpsToolProvider:
                 "会重新标记镜像并重建服务，不会自动回滚数据库"
             )
             if self.approver(label, RiskLevel.REVIEW, reason):
-                return None
-            return f"用户未批准回滚操作: {reason}"
+                return None, False
+            return f"用户未批准回滚操作: {reason}", False
         if name not in self._MUTATIONS or self.approval_mode == "full":
-            return None
+            return None, False
         environment = arguments.get("environment") or "默认环境"
         label = f"{name} {json.dumps(arguments, ensure_ascii=False, separators=(',', ':'))}"
         reason = f"DevOps 操作会修改 {environment} 的镜像、容器或服务状态"
         if self.approver(label, RiskLevel.REVIEW, reason):
-            return None
-        return f"用户未批准 DevOps 操作: {reason}"
+            return None, False
+        return f"用户未批准 DevOps 操作: {reason}", False
+
+    def _approve_release(
+        self, arguments: dict[str, Any], preview: dict[str, Any]
+    ) -> tuple[str | None, bool]:
+        checks = preview.get("checks") if isinstance(preview.get("checks"), list) else []
+        denied = [item for item in checks if item.get("risk") == RiskLevel.DENY.value]
+        if denied:
+            names = "、".join(str(item.get("name") or "未命名检查") for item in denied)
+            return f"发布门禁包含禁止命令，不能执行: {names}", False
+        review = [item for item in checks if item.get("risk") == RiskLevel.REVIEW.value]
+        config_changed = bool(
+            self.change_tracker
+            and "coding-agent.toml" in self.change_tracker.changes
+        )
+        requires_approval = self.approval_mode != "full" or bool(review) or config_changed
+        if not requires_approval:
+            return None, False
+
+        display = {
+            "version": arguments["version"],
+            "environment": preview["environment"],
+            "require_git": preview.get("require_git", False),
+            "require_clean_worktree": preview.get("require_clean_worktree", False),
+            "config_changed_in_task": config_changed,
+            "checks": checks,
+        }
+        label = f"compose_release {json.dumps(display, ensure_ascii=False, separators=(',', ':'))}"
+        command_text = "；".join(
+            f"{item.get('name')}: {json.dumps(item.get('command'), ensure_ascii=False)}"
+            for item in checks
+        ) or "无额外检查命令"
+        warnings = []
+        if config_changed:
+            warnings.append("本次任务修改了 coding-agent.toml")
+        if review:
+            warnings.append("包含未列入安全清单的命令")
+        suffix = f"；注意：{'；'.join(warnings)}" if warnings else ""
+        reason = (
+            f"人工确认发布 {arguments['version']} 到 {preview['environment']}；"
+            f"门禁命令：{command_text}{suffix}"
+        )
+        if self.approver(label, RiskLevel.REVIEW, reason):
+            return None, bool(review)
+        return f"用户未批准发布操作: {reason}", False
 
     @staticmethod
     def _validate(arguments: dict[str, Any], schema: dict[str, Any]) -> str | None:
