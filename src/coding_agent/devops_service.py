@@ -19,7 +19,7 @@ from typing import Any
 from urllib import error as urlerror
 from urllib import request as urlrequest
 
-from .release_store import ReleaseStore
+from .release_store import ReleaseLockBusy, ReleaseStore
 from .safety import CommandPolicy, RiskLevel
 
 
@@ -398,13 +398,14 @@ class DevOpsService:
     ) -> dict[str, Any]:
         _config, selected = self._resolve_environment(environment)
         with self._environment_operation(selected, "compose_release"):
-            return self._release_unlocked(
-                version,
-                environment,
-                services,
-                expected_policy_digest=expected_policy_digest,
-                allow_review_checks=allow_review_checks,
-            )
+            with self._release_transaction("compose_release", selected):
+                return self._release_unlocked(
+                    version,
+                    environment,
+                    services,
+                    expected_policy_digest=expected_policy_digest,
+                    allow_review_checks=allow_review_checks,
+                )
 
     def release_preview(self, environment: str | None = None) -> dict[str, Any]:
         config, selected = self._resolve_environment(environment)
@@ -551,7 +552,8 @@ class DevOpsService:
     def rollback_plan(self, version: str, environment: str | None = None) -> dict[str, Any]:
         _config, selected = self._resolve_environment(environment)
         with self._environment_operation(selected, "compose_rollback_plan"):
-            return self._rollback_plan_unlocked(version, environment)
+            with self._release_transaction("compose_rollback_plan", selected):
+                return self._rollback_plan_unlocked(version, environment)
 
     def _rollback_plan_unlocked(
         self, version: str, environment: str | None = None
@@ -608,7 +610,8 @@ class DevOpsService:
         assert plan is not None
         _config, selected = self._resolve_environment(str(plan["environment"]))
         with self._environment_operation(selected, "compose_rollback"):
-            return self._rollback_unlocked(plan_id)
+            with self._release_transaction("compose_rollback", selected):
+                return self._rollback_unlocked(plan_id)
 
     def _rollback_unlocked(self, plan_id: str) -> dict[str, Any]:
         plan_key = self._validate_plan_id(plan_id)
@@ -1080,11 +1083,35 @@ class DevOpsService:
                 "started_at": self._now(),
             }
         try:
-            yield
+            try:
+                with self.release_store.environment_lock(
+                    key, operation, selected.name
+                ):
+                    yield
+            except ReleaseLockBusy as exc:
+                raise DevOpsOperationError(
+                    "environment_busy",
+                    f"环境 {selected.name} 正被另一个 Coding Agent 进程修改",
+                    output=json.dumps(exc.metadata, ensure_ascii=False),
+                ) from exc
         finally:
             with self._locks_guard:
                 self._active_operations.pop(key, None)
                 lock.release()
+
+    @contextmanager
+    def _release_transaction(
+        self, operation: str, selected: DevOpsEnvironment
+    ) -> Any:
+        try:
+            with self.release_store.transaction(operation, selected.name):
+                yield
+        except ReleaseLockBusy as exc:
+            raise DevOpsOperationError(
+                "release_store_busy",
+                "发布审计记录正由另一个环境或进程更新，请稍后重试",
+                output=json.dumps(exc.metadata, ensure_ascii=False),
+            ) from exc
 
     def _write_operation(
         self,

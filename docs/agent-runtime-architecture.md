@@ -109,8 +109,8 @@ DevOps 的构建、拉取、部署、重启和停止在 `request` 与 `risk` 中
 
 ## 并发与取消
 
-HTTP 服务按请求使用线程。每个运行中的对话有独立取消事件；Agent 会在模型调用和工具调用边界检查。通用命令和 Docker CLI 都使用独立进程组，超时或取消时终止整个进程树。DevOps 服务在 0.2 秒轮询周期内观察取消信号，并以约 0.5 秒间隔上报阶段耗时；进度只保存在内存状态中，避免长构建期间反复写会话文件。所有变更型 DevOps 操作还按工作区、Docker Context 和环境持有进程内互斥锁，冲突请求立即返回 `environment_busy`；取消和异常路径通过 `finally` 释放锁。
+HTTP 服务按请求使用线程。每个运行中的对话有独立取消事件；Agent 会在模型调用和工具调用边界检查。通用命令和 Docker CLI 都使用独立进程组，超时或取消时终止整个进程树。DevOps 服务在 0.2 秒轮询周期内观察取消信号，并以约 0.5 秒间隔上报阶段耗时；进度只保存在内存状态中，避免长构建期间反复写会话文件。所有变更型 DevOps 操作按工作区、Docker Context 和环境同时持有进程内锁与跨进程文件锁，冲突请求返回 `environment_busy`；发布状态的读改写阶段另持有全局事务锁，冲突返回 `release_store_busy`。锁由操作系统文件描述符所有，进程崩溃也会释放；持有者摘要写入独立 sidecar，供其他进程安全读取。
 
 ## 测试边界
 
-测试覆盖 Agent 工具协议、上下文、文件、Git 与 DevOps 安全边界、WebRuntime、HTTP 边界、持久化和浏览器静态资源。Git 远端测试只使用本地 bare 仓库；Compose 测试使用记录参数数组的假 Docker Runner。自动化测试不调用真实模型 API、Docker Engine 或公共互联网。
+测试覆盖 Agent 工具协议、上下文、文件、Git 与 DevOps 安全边界、WebRuntime、HTTP 边界、持久化和浏览器静态资源。Git 远端测试只使用本地 bare 仓库；Compose 测试使用记录参数数组的假 Docker Runner；发布锁测试启动独立 Python 子进程验证真实跨进程竞争和释放。自动化测试不调用真实模型 API、Docker Engine 或公共互联网。

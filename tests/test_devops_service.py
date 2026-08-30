@@ -380,6 +380,20 @@ def test_mutations_are_serialized_per_workspace_environment(tmp_path: Path) -> N
     assert "compose_release" in caught.value.output
 
 
+def test_release_transaction_conflict_fails_before_docker_changes(tmp_path: Path) -> None:
+    write_compose(tmp_path)
+    docker = FakeDockerRunner()
+    service = DevOpsService(tmp_path, docker)
+
+    with service.release_store.transaction("compose_rollback", "production"):
+        with pytest.raises(DevOpsOperationError) as caught:
+            service.release("v1")
+
+    assert caught.value.code == "release_store_busy"
+    assert "compose_rollback" in caught.value.output
+    assert docker.calls == []
+
+
 def test_release_gate_blocks_dirty_worktree_before_deploy(tmp_path: Path) -> None:
     write_compose(tmp_path)
     (tmp_path / "coding-agent.toml").write_text(
