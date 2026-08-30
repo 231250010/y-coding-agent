@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -55,6 +56,45 @@ def wait_for_approval(runtime: WebRuntime) -> dict[str, Any]:
             return approvals[0]
         time.sleep(0.01)
     raise AssertionError("approval did not appear")
+
+
+def test_streaming_text_is_exposed_in_memory_then_replaced_by_final_entry(
+    tmp_path: Path,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    class StreamingModel:
+        def complete_stream(
+            self,
+            _messages: Sequence[Message],
+            _tools: Sequence[dict[str, Any]],
+            on_delta: Any,
+        ) -> AssistantResponse:
+            on_delta("正在生成")
+            started.set()
+            assert release.wait(2)
+            on_delta("最终内容")
+            return AssistantResponse("正在生成最终内容")
+
+        def complete(self, *_args: Any, **_kwargs: Any) -> AssistantResponse:
+            raise AssertionError("main request should stream")
+
+    runtime = WebRuntime(settings(tmp_path), tmp_path, model_factory=StreamingModel)
+    task = runtime.new_conversation()
+    runtime.send_message(task["id"], "stream")
+
+    assert started.wait(2)
+    active = next(
+        item for item in runtime.snapshot()["tasks"] if item["id"] == task["id"]
+    )
+    assert active["streaming_content"] == "正在生成"
+    assert active["running"] is True
+
+    release.set()
+    finished = wait_until_idle(runtime, task["id"])
+    assert finished["streaming_content"] == ""
+    assert finished["entries"][-1]["text"] == "正在生成最终内容"
 
 
 def test_project_and_conversation_are_created_for_existing_directory(tmp_path: Path) -> None:

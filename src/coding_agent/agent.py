@@ -79,7 +79,7 @@ class CodingAgent:
             self._sync_task_list_anchor()
             self.on_event("model_start", {"step": step, "max_steps": self.max_steps})
             self.history = self.context.compact(self.history, self._summarize)
-            response = self.model.complete(self.history, self.tools.schemas())
+            response = self._complete_model(step)
             self._check_cancelled()
             self._append_assistant(response)
 
@@ -201,6 +201,25 @@ class CodingAgent:
             return False
         checker = getattr(self.tools, "can_run_parallel", None)
         return bool(checker and checker(call.name, arguments))
+
+    def _complete_model(self, step: int) -> AssistantResponse:
+        complete_stream = getattr(self.model, "complete_stream", None)
+        if not callable(complete_stream):
+            return self.model.complete(self.history, self.tools.schemas())
+
+        parts: list[str] = []
+
+        def receive(delta: str) -> None:
+            self._check_cancelled()
+            if not delta:
+                return
+            parts.append(delta)
+            self.on_event(
+                "assistant_delta",
+                {"delta": delta, "content": "".join(parts), "step": step},
+            )
+
+        return complete_stream(self.history, self.tools.schemas(), receive)
 
     def _summarize(self, old_conversation: str) -> str:
         self.on_event("summary_start", {})

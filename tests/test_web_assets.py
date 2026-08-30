@@ -102,6 +102,19 @@ def test_assistant_markdown_uses_safe_dom_rendering_and_has_rich_styles() -> Non
         assert selector in css
 
 
+def test_frontend_streams_state_with_sse_and_renders_partial_assistant_text() -> None:
+    javascript = asset("app.js")
+    css = asset("app.css")
+
+    assert 'new EventSource("/api/events")' in javascript
+    assert 'stateEvents.addEventListener("state"' in javascript
+    assert "task.streaming_content" in javascript
+    assert "entry.streaming" in javascript
+    assert "setInterval(() => refresh(true), 5000)" in javascript
+    assert ".message.streaming" in css
+    assert "stream-cursor" in css
+
+
 def test_devops_progress_rail_and_cancel_control_are_wired() -> None:
     html = asset("index.html")
     javascript = asset("app.js")

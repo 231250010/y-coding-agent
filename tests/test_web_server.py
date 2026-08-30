@@ -64,6 +64,19 @@ def request(
     return response.status, content_type, data
 
 
+def read_sse_event(response: http.client.HTTPResponse) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    while True:
+        line = response.readline().decode("utf-8").rstrip("\r\n")
+        if not line:
+            return fields
+        if line.startswith(":"):
+            continue
+        name, separator, value = line.partition(":")
+        if separator:
+            fields[name] = value.lstrip()
+
+
 def test_state_and_project_routes_return_json_without_secret(tmp_path: Path) -> None:
     with running_server(tmp_path) as (_runtime, port):
         status, content_type, raw = request(port, "GET", "/api/state")
@@ -81,6 +94,29 @@ def test_state_and_project_routes_return_json_without_secret(tmp_path: Path) -> 
     assert created_status == 201
     assert created["project"]["path"] == str(tmp_path.resolve())
     assert "unit-test-secret" not in json.dumps(state)
+
+
+def test_sse_route_pushes_initial_and_updated_state(tmp_path: Path) -> None:
+    with running_server(tmp_path) as (runtime, port):
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        connection.request(
+            "GET",
+            "/api/events",
+            headers={"Host": f"127.0.0.1:{port}"},
+        )
+        response = connection.getresponse()
+        first = read_sse_event(response)
+        runtime.new_conversation()
+        second = read_sse_event(response)
+        connection.close()
+
+    assert response.status == 200
+    assert (response.getheader("Content-Type") or "").startswith("text/event-stream")
+    assert first["event"] == "state"
+    assert json.loads(first["data"])["tasks"] == []
+    assert second["event"] == "state"
+    assert len(json.loads(second["data"])["tasks"]) == 1
+    assert int(second["id"]) > int(first["id"])
 
 
 def test_conversation_can_be_created_selected_and_bound(tmp_path: Path) -> None:

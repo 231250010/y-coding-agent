@@ -69,6 +69,9 @@ class LocalRequestHandler(BaseHTTPRequestHandler):
             if method == "GET" and path in STATIC_ROUTES:
                 self._static(path)
                 return
+            if method == "GET" and path == "/api/events":
+                self._events()
+                return
             payload = self._json_body() if method in {"POST", "PATCH", "DELETE"} else {}
             status, response = self._dispatch(method, path, payload)
             if status == 204:
@@ -219,6 +222,39 @@ class LocalRequestHandler(BaseHTTPRequestHandler):
         self._common_headers()
         self.send_header("Content-Length", "0")
         self.end_headers()
+
+    def _events(self) -> None:
+        raw_event_id = self.headers.get("Last-Event-ID")
+        try:
+            after_revision = int(raw_event_id) if raw_event_id is not None else -1
+        except ValueError:
+            after_revision = -1
+        self.send_response(200)
+        self._common_headers()
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        while True:
+            revision, state = self.server.runtime.wait_for_state(
+                after_revision, timeout=15.0
+            )
+            if revision <= after_revision:
+                frame = b": keepalive\n\n"
+            else:
+                payload = json.dumps(
+                    state, ensure_ascii=False, separators=(",", ":")
+                )
+                frame = (
+                    f"id: {revision}\nevent: state\ndata: {payload}\n\n"
+                ).encode("utf-8")
+                after_revision = revision
+            try:
+                self.wfile.write(frame)
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                return
 
     def _common_headers(self) -> None:
         self.send_header("X-Content-Type-Options", "nosniff")

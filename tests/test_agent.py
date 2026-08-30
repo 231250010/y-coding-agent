@@ -47,6 +47,37 @@ def test_plain_answer(tmp_path: Path) -> None:
     assert model.requests[0][0][-1] == {"role": "user", "content": "做任务"}
 
 
+def test_agent_emits_incremental_assistant_text_when_model_supports_streaming(
+    tmp_path: Path,
+) -> None:
+    class StreamingModel:
+        def complete_stream(
+            self,
+            _messages: Sequence[Message],
+            _tools: Sequence[dict[str, Any]],
+            on_delta: Any,
+        ) -> AssistantResponse:
+            on_delta("第一段")
+            on_delta("第二段")
+            return AssistantResponse("第一段第二段")
+
+        def complete(self, *_args: Any, **_kwargs: Any) -> AssistantResponse:
+            raise AssertionError("main model call should stream")
+
+    events: list[tuple[str, dict[str, Any]]] = []
+    agent = CodingAgent(
+        StreamingModel(),  # type: ignore[arg-type]
+        ToolRegistry(tmp_path),
+        ContextManager(100_000),
+        on_event=lambda name, data: events.append((name, data)),
+    )
+
+    assert agent.run("回答") == "第一段第二段"
+    deltas = [data for name, data in events if name == "assistant_delta"]
+    assert [item["delta"] for item in deltas] == ["第一段", "第二段"]
+    assert deltas[-1]["content"] == "第一段第二段"
+
+
 def test_single_tool_round_trip(tmp_path: Path) -> None:
     responses = [
         AssistantResponse(tool_calls=[call("c1", "write_file", {"path": "a.txt", "content": "hello"})]),

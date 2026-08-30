@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -65,6 +66,7 @@ class WebTask:
     history: list[dict[str, Any]] = field(default_factory=list)
     running: bool = False
     status: str = "就绪"
+    streaming_content: str = ""
     progress: dict[str, Any] | None = None
     cancel_event: threading.Event = field(default_factory=threading.Event)
     change_tracker: ConversationChangeTracker = field(
@@ -103,6 +105,9 @@ class WebRuntime:
         self.current_id: str | None = None
         self.approvals: dict[str, PendingApproval] = {}
         self.lock = threading.RLock()
+        self.events = threading.Condition(self.lock)
+        self.revision = 0
+        self._last_stream_notice: dict[str, float] = {}
         self._load()
 
     def snapshot(self) -> dict[str, Any]:
@@ -121,7 +126,19 @@ class WebRuntime:
                     "api_key_configured": bool(self.settings.api_key.strip()),
                     "remember_key": self.settings.remember_key,
                 },
+                "revision": self.revision,
             }
+
+    def wait_for_state(
+        self, after_revision: int, timeout: float = 15.0
+    ) -> tuple[int, dict[str, Any]]:
+        with self.events:
+            if self.revision <= after_revision:
+                self.events.wait_for(
+                    lambda: self.revision > after_revision,
+                    timeout=max(0.0, timeout),
+                )
+            return self.revision, self.snapshot()
 
     def add_project(self, raw_path: str) -> dict[str, Any]:
         path = self._workspace_path(raw_path)
@@ -365,6 +382,7 @@ class WebRuntime:
                 task.title = self._display_name(message)[:36]
             task.running = True
             task.status = "正在连接模型"
+            task.streaming_content = ""
             task.progress = None
             task.cancel_event.clear()
             task.pending_change_paths.clear()
@@ -394,6 +412,7 @@ class WebRuntime:
                 if approval.task_id == task.id:
                     approval.approved = False
                     approval.signal.set()
+            self._touch()
 
     def resolve_approval(self, approval_id: str, approved: bool) -> None:
         with self.lock:
@@ -402,6 +421,7 @@ class WebRuntime:
                 raise RuntimeNotFound("审批请求不存在或已经处理")
             approval.approved = bool(approved)
             approval.signal.set()
+            self._touch()
 
     def diff(self, task_id: str, path: str) -> dict[str, Any]:
         with self.lock:
@@ -606,6 +626,7 @@ class WebRuntime:
             if not self.settings.model:
                 raise ValueError("模型名称不能为空")
             self.settings.save(self.settings_root)
+            self._touch()
             return self.snapshot()["settings"]
 
     def _run_task(self, task_id: str, message: str) -> None:
@@ -624,6 +645,7 @@ class WebRuntime:
                     path for path in task.pending_change_paths if path in task.change_tracker.changes
                 )
                 task.entries.append(ChatEntry("assistant", result, visible_paths))
+                task.streaming_content = ""
                 task.pending_change_paths.clear()
                 task.running = False
                 task.status = "已完成"
@@ -653,6 +675,7 @@ class WebRuntime:
                 path for path in task.pending_change_paths if path in task.change_tracker.changes
             )
             task.entries.append(ChatEntry(kind, text, visible_paths))
+            task.streaming_content = ""
             task.pending_change_paths.clear()
             task.running = False
             task.status = "已停止" if kind == "system" else "发生错误"
@@ -734,10 +757,22 @@ class WebRuntime:
             except RuntimeNotFound:
                 return
             if name == "model_start":
+                task.streaming_content = ""
                 task.status = f"模型思考中 · {data.get('step', 1)}/{data.get('max_steps', 1)}"
+            elif name == "assistant_delta":
+                content = data.get("content")
+                if isinstance(content, str):
+                    task.streaming_content = content[:200_000]
+                task.status = "模型正在回答"
+                now = time.monotonic()
+                if now - self._last_stream_notice.get(task.id, 0.0) >= 0.05:
+                    self._last_stream_notice[task.id] = now
+                    self._touch()
+                return
             elif name == "summary_start":
                 task.status = "正在压缩上下文"
             elif name == "tool_start":
+                task.streaming_content = ""
                 task.status = f"正在执行 {data.get('name', '工具')}"
                 tool_name = str(data.get("name") or "")
                 if tool_name.startswith("compose_"):
@@ -781,7 +816,9 @@ class WebRuntime:
                         "percent": 100 if ok else task.progress.get("percent", 0),
                         "label": "部署已停止" if cancelled else ("部署步骤完成" if ok else "部署步骤失败"),
                     }
-            if name != "tool_progress":
+            if name == "tool_progress":
+                self._touch()
+            else:
                 self._save()
 
     def _request_approval(
@@ -796,6 +833,7 @@ class WebRuntime:
             self.approvals[approval.id] = approval
             task = self._task(task_id)
             task.status = "等待操作审批"
+            self._touch()
         try:
             while not approval.signal.wait(0.1):
                 with self.lock:
@@ -806,6 +844,7 @@ class WebRuntime:
         finally:
             with self.lock:
                 self.approvals.pop(approval.id, None)
+                self._touch()
 
     def _load(self) -> None:
         state = self.store.load()
@@ -919,6 +958,12 @@ class WebRuntime:
                 ],
             }
         )
+        self._touch()
+
+    def _touch(self) -> None:
+        with self.events:
+            self.revision += 1
+            self.events.notify_all()
 
     def _project(self, project_id: str | None) -> WebProject:
         project = next((item for item in self.projects if item.id == project_id), None)
@@ -959,6 +1004,7 @@ class WebRuntime:
             "title": task.title,
             "running": task.running,
             "status": task.status,
+            "streaming_content": task.streaming_content,
             "progress": task.progress,
             "workspace": str(workspace) if workspace else None,
             "source_workspace": str(project.path) if project else None,

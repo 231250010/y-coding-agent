@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol, Sequence
 
@@ -15,6 +16,7 @@ from openai import (
 
 
 Message = dict[str, Any]
+StreamCallback = Callable[[str], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +116,116 @@ class OpenAIChatModel:
                 raise
             except Exception as exc:
                 raise ModelError(f"模型请求失败: {exc}") from exc
-
         raise ModelError("模型请求失败")
 
+    def complete_stream(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[dict[str, Any]] | None,
+        on_delta: StreamCallback,
+    ) -> AssistantResponse:
+        request: dict[str, Any] = {
+            "model": self.model,
+            "messages": list(messages),
+            "stream": True,
+        }
+        if tools:
+            request.update({"tools": list(tools), "tool_choice": "auto"})
+
+        for attempt in range(self.max_retries + 1):
+            received_chunk = False
+            received_choice = False
+            stream: Any = None
+            try:
+                stream = self._client.chat.completions.create(**request)
+                content_parts: list[str] = []
+                tool_parts: dict[int, dict[str, str]] = {}
+                finish_reason: str | None = None
+                for chunk in stream:
+                    received_chunk = True
+                    choices = getattr(chunk, "choices", None) or []
+                    if not choices:
+                        self._emit_delta(on_delta, "")
+                        continue
+                    received_choice = True
+                    choice = choices[0]
+                    delta = getattr(choice, "delta", None)
+                    content = getattr(delta, "content", None) if delta else None
+                    if isinstance(content, str) and content:
+                        content_parts.append(content)
+                    self._emit_delta(on_delta, content if isinstance(content, str) else "")
+                    for item in (getattr(delta, "tool_calls", None) or []):
+                        index = int(getattr(item, "index", 0) or 0)
+                        part = tool_parts.setdefault(
+                            index, {"id": "", "name": "", "arguments": ""}
+                        )
+                        identifier = getattr(item, "id", None)
+                        if isinstance(identifier, str) and identifier:
+                            part["id"] = identifier
+                        function = getattr(item, "function", None)
+                        name = getattr(function, "name", None) if function else None
+                        arguments = (
+                            getattr(function, "arguments", None) if function else None
+                        )
+                        if isinstance(name, str):
+                            part["name"] += name
+                        if isinstance(arguments, str):
+                            part["arguments"] += arguments
+                    candidate_reason = getattr(choice, "finish_reason", None)
+                    if candidate_reason is not None:
+                        finish_reason = str(candidate_reason)
+
+                if not received_choice:
+                    raise ModelError("模型返回了空流式响应")
+                calls: list[ToolCall] = []
+                for index in sorted(tool_parts):
+                    part = tool_parts[index]
+                    if not part["id"] or not part["name"]:
+                        raise ModelError("模型返回了不完整的流式工具调用")
+                    calls.append(
+                        ToolCall(part["id"], part["name"], part["arguments"])
+                    )
+                return AssistantResponse(
+                    content="".join(content_parts) or None,
+                    tool_calls=tuple(calls),
+                    finish_reason=finish_reason,
+                )
+            except _StreamCallbackAbort as exc:
+                raise exc.original
+            except (AuthenticationError, BadRequestError) as exc:
+                raise ModelError(f"模型请求不可重试: {exc}") from exc
+            except (RateLimitError, APIConnectionError, APITimeoutError) as exc:
+                if received_chunk or attempt >= self.max_retries:
+                    detail = "模型流式响应中断" if received_chunk else "模型请求在重试后仍失败"
+                    raise ModelError(f"{detail}: {exc}") from exc
+                self._sleep(2**attempt)
+            except ModelError:
+                raise
+            except Exception as exc:
+                if received_chunk:
+                    raise ModelError(f"模型流式响应中断: {exc}") from exc
+                if attempt >= self.max_retries:
+                    raise ModelError(f"模型请求失败: {exc}") from exc
+                self._sleep(2**attempt)
+            finally:
+                close = getattr(stream, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:
+                        pass
+
+        raise ModelError("模型流式请求未返回结果")
+
+    @staticmethod
+    def _emit_delta(callback: StreamCallback, content: str) -> None:
+        try:
+            callback(content)
+        except Exception as exc:
+            raise _StreamCallbackAbort(exc) from exc
+
+
+class _StreamCallbackAbort(Exception):
+    def __init__(self, original: Exception) -> None:
+        super().__init__(str(original))
+        self.original = original

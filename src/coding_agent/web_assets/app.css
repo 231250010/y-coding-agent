@@ -132,6 +132,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .message-label { margin: 0 0 8px; color: var(--muted); font-size: 11px; font-weight: 700; }
 .message-body { max-width: 780px; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.72; font-size: 14px; }
 .message-body.markdown { white-space: normal; overflow-wrap: break-word; }
+.message.streaming .message-label::after { content: " · LIVE"; color: var(--accent-dark); font-family: var(--mono); font-size: 9px; letter-spacing: .08em; }
+.message.streaming .message-body::after { content: ""; display: inline-block; width: 7px; height: 1.05em; margin-left: 4px; border-radius: 2px; background: var(--accent-dark); vertical-align: -.18em; animation: stream-cursor 850ms steps(1) infinite; }
 .markdown > :first-child { margin-top: 0; }
 .markdown > :last-child { margin-bottom: 0; }
 .markdown p { margin: 0 0 12px; }
@@ -174,6 +176,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .empty-state[hidden] { display: none; }
 .empty-mark { display: grid; place-items: center; width: 50px; height: 50px; margin: 0 auto 16px; border: 1px solid #e3c1ac; border-radius: 17px 17px 17px 5px; background: #fff3e9; color: var(--accent-dark); font-family: var(--mono); font-size: 25px; }
 .empty-state h2 { margin: 0; font-size: clamp(22px, 3vw, 30px); letter-spacing: -.03em; }
+@keyframes stream-cursor { 50% { opacity: .18; } }
 .empty-state p { margin: 8px 0 20px; color: var(--muted); font-size: 13px; }
 .suggestions { display: flex; flex-wrap: wrap; justify-content: center; gap: 7px; }
 .suggestions button { padding: 8px 11px; border: 1px solid var(--border); border-radius: 999px; background: var(--paper); color: var(--muted); font-size: 11px; cursor: pointer; }

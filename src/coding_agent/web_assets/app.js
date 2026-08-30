@@ -49,6 +49,7 @@ let menuEl = null;
 let menuAnchor = null;
 let shownApproval = null;
 let lastTranscriptKey = "";
+let stateEvents = null;
 let toastTimer = null;
 
 function element(tag, className, text) {
@@ -241,6 +242,7 @@ function renderSidebar() {
 
 function messageNode(entry) {
   const article = element("article", `message ${entry.kind}`);
+  if (entry.streaming) article.classList.add("streaming");
   const labels = { assistant: "小码", tool: "本地工具", error: "运行错误", system: "系统" };
   article.append(element("p", "message-label", labels[entry.kind] || "你"));
   const body = element("div", "message-body");
@@ -364,11 +366,15 @@ function renderConversation() {
   ui.stop.hidden = !task.running;
   renderTaskPlan(task);
   renderProgress(task);
-  ui.empty.hidden = task.entries.length > 0;
+  const streaming = task.streaming_content || "";
+  ui.empty.hidden = task.entries.length > 0 || Boolean(streaming);
   const last = task.entries.length ? task.entries[task.entries.length - 1].text : "";
-  const key = `${task.id}:${task.entries.length}:${last}:${task.running}`;
+  const key = `${task.id}:${task.entries.length}:${last}:${task.running}:${streaming}`;
   if (key !== lastTranscriptKey) {
-    ui.transcript.replaceChildren(...task.entries.map(messageNode));
+    const entries = streaming
+      ? [...task.entries, { kind: "assistant", text: streaming, change_paths: [], streaming: true }]
+      : task.entries;
+    ui.transcript.replaceChildren(...entries.map(messageNode));
     ui.transcript.scrollTop = ui.transcript.scrollHeight;
     lastTranscriptKey = key;
   }
@@ -398,13 +404,27 @@ function render() { renderSidebar(); renderConversation(); renderSettingsStatus(
 
 async function refresh(silent = true) {
   try {
-    state = await api("/api/state");
-    if (!state.current_id && state.tasks.length) state.current_id = state.tasks[0].id;
-    render();
+    applyState(await api("/api/state"));
   } catch (error) {
     if (!silent) toast(error.message);
     ui.connection.textContent = "本机服务连接失败";
   }
+}
+
+function applyState(nextState) {
+  if (Number.isFinite(state.revision) && Number.isFinite(nextState.revision) && nextState.revision < state.revision) return;
+  state = nextState;
+  if (!state.current_id && state.tasks.length) state.current_id = state.tasks[0].id;
+  render();
+}
+
+function connectStateEvents() {
+  if (!("EventSource" in window) || stateEvents) return;
+  stateEvents = new EventSource("/api/events");
+  stateEvents.addEventListener("state", (event) => {
+    try { applyState(JSON.parse(event.data)); }
+    catch (_error) { /* A later event or polling refresh will recover state. */ }
+  });
 }
 
 async function selectTask(taskId) {
@@ -864,5 +884,5 @@ refresh(false).then(async () => {
     try { await api("/api/conversations", { method: "POST", body: {} }); await refresh(false); }
     catch (error) { toast(error.message); }
   }
-});
-setInterval(() => refresh(true), 700);
+}).finally(connectStateEvents);
+setInterval(() => refresh(true), 5000);
