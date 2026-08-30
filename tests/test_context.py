@@ -57,12 +57,52 @@ def test_summary_failure_uses_fallback_notice() -> None:
     assert any("task-2" in str(message.get("content")) for message in compacted)
 
 
-def test_large_tool_output_is_truncated_without_splitting() -> None:
-    messages = [{"role": "system", "content": "s"}] + make_turn(0, 10_000)
-    manager = ContextManager(100)
+def test_recent_tool_output_stays_complete_below_hard_limit() -> None:
+    messages = [{"role": "system", "content": "s"}] + make_turn(0, 4_500)
+    original = str(messages[3]["content"])
+    manager = ContextManager(8_000, trigger_ratio=0.5)
+
     compacted = manager.compact(messages, lambda _text: "summary")
+
     tool = next(message for message in compacted if message.get("role") == "tool")
-    assert "已截断" in str(tool["content"])
+    assert tool["content"] == original
+
+
+def test_recent_tool_output_keeps_head_and_tail_at_hard_limit() -> None:
+    messages = [{"role": "system", "content": "s"}] + make_turn(0, 10)
+    content = "HEAD-IMPORTANT\n" + "x" * 10_000 + "\nTAIL-ERROR"
+    messages[3]["content"] = content
+    manager = ContextManager(500)
+
+    compacted = manager.compact(messages, lambda _text: "summary")
+
+    tool = next(message for message in compacted if message.get("role") == "tool")
+    result = str(tool["content"])
+    assert result.startswith("HEAD-IMPORTANT")
+    assert result.endswith("TAIL-ERROR")
+    assert "近期工具输出因硬性上下文上限已截断" in result
+    assert manager.estimate_tokens(compacted) <= manager.max_tokens
+
+
+def test_old_tool_output_is_bounded_before_summary_and_keeps_tail() -> None:
+    old_turn = make_turn(0, 10)
+    old_turn[2]["content"] = "OLD-HEAD\n" + "z" * 10_000 + "\nOLD-TAIL"
+    messages = (
+        [{"role": "system", "content": "s"}]
+        + old_turn
+        + make_turn(1, 100)
+        + make_turn(2, 100)
+    )
+    seen: list[str] = []
+
+    ContextManager(1_000, keep_recent_turns=2).compact(
+        messages, lambda text: seen.append(text) or "summary"
+    )
+
+    assert seen
+    assert "OLD-HEAD" in seen[0]
+    assert "OLD-TAIL" in seen[0]
+    assert "旧工具输出为生成摘要已压缩" in seen[0]
 
 
 def test_repeated_compaction_replaces_old_summary_with_one_rolling_note() -> None:
