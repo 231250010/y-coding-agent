@@ -58,7 +58,7 @@ CodingAgent
 
 1. 浏览器向 `/api/conversations/{id}/messages` 提交用户消息。
 2. `WebRuntime` 校验对话状态并创建后台 Agent 任务。
-3. `CodingAgent` 压缩上下文后调用模型并附带本地工具 Schema。
+3. `CodingAgent` 在预算阈值处把旧滚动摘要和新淘汰轮次合并为唯一的新摘要，再调用模型并附带本地工具 Schema。
 4. 模型返回工具调用时，组合提供者按工具名路由。
 5. 工具进行参数、路径和权限检查；DevOps 长操作同时回传阶段、环境、耗时和完成比例，执行后返回结构化结果。
 6. Agent 把 `tool` 消息交回模型，并把展示事件交给 `WebRuntime`。

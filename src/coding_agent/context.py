@@ -9,6 +9,8 @@ from .model import Message
 
 
 Summarizer = Callable[[str], str]
+SUMMARY_PREFIX = "较早会话摘要：\n"
+SUMMARY_FALLBACK = "较早会话因上下文预算已被裁剪；请依据当前工作区和近期消息继续。"
 
 
 class ContextManager:
@@ -32,11 +34,20 @@ class ContextManager:
             return current
 
         prelude, turns = self._partition_turns(current)
+        previous_notes = [message for message in prelude if self._is_summary_note(message)]
+        stable_prelude = [message for message in prelude if not self._is_summary_note(message)]
         if len(turns) > self.keep_recent_turns:
             old_turns = turns[: -self.keep_recent_turns]
             recent_turns = turns[-self.keep_recent_turns :]
             old_text = json.dumps(
-                [message for turn in old_turns for message in turn],
+                {
+                    "previous_summaries": [
+                        self._summary_body(message) for message in previous_notes
+                    ],
+                    "newly_compacted_turns": [
+                        message for turn in old_turns for message in turn
+                    ],
+                },
                 ensure_ascii=False,
                 indent=2,
             )
@@ -44,15 +55,28 @@ class ContextManager:
                 summary = summarize(old_text).strip()
                 if not summary:
                     raise ValueError("empty summary")
-                note = {"role": "system", "content": f"较早会话摘要：\n{summary}"}
+                note = {"role": "system", "content": f"{SUMMARY_PREFIX}{summary}"}
             except Exception:
-                note = {
-                    "role": "system",
-                    "content": "较早会话因上下文预算已被裁剪；请依据当前工作区和近期消息继续。",
-                }
-            current = prelude + [note] + [message for turn in recent_turns for message in turn]
+                note = {"role": "system", "content": SUMMARY_FALLBACK}
+            current = stable_prelude + [note] + [
+                message for turn in recent_turns for message in turn
+            ]
 
         return self._truncate_large_results(current)
+
+    @staticmethod
+    def _is_summary_note(message: Message) -> bool:
+        content = message.get("content")
+        return message.get("role") == "system" and isinstance(content, str) and (
+            content.startswith(SUMMARY_PREFIX) or content == SUMMARY_FALLBACK
+        )
+
+    @staticmethod
+    def _summary_body(message: Message) -> str:
+        content = str(message.get("content") or "")
+        if content.startswith(SUMMARY_PREFIX):
+            return content[len(SUMMARY_PREFIX) :]
+        return content
 
     @staticmethod
     def _partition_turns(messages: list[Message]) -> tuple[list[Message], list[list[Message]]]:
@@ -80,4 +104,3 @@ class ContextManager:
                 copied["content"] = content[:4_000] + "\n... [旧工具输出因上下文预算已截断]"
             result.append(copied)
         return result
-

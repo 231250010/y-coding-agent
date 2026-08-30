@@ -64,3 +64,83 @@ def test_large_tool_output_is_truncated_without_splitting() -> None:
     tool = next(message for message in compacted if message.get("role") == "tool")
     assert "已截断" in str(tool["content"])
 
+
+def test_repeated_compaction_replaces_old_summary_with_one_rolling_note() -> None:
+    manager = ContextManager(500, keep_recent_turns=2)
+    messages: list[dict[str, object]] = [
+        {"role": "system", "content": "system"},
+        {"role": "system", "content": "persistent policy"},
+    ]
+    for index in range(4):
+        messages.extend(make_turn(index, 300))
+
+    first = manager.compact(messages, lambda _text: "summary-v1")
+    for index in range(4, 6):
+        first.extend(make_turn(index, 300))
+    seen: list[str] = []
+    second = manager.compact(
+        first, lambda text: seen.append(text) or "summary-v2"
+    )
+
+    notes = [
+        message
+        for message in second
+        if str(message.get("content") or "").startswith("较早会话摘要：")
+    ]
+    assert [message["content"] for message in notes] == ["较早会话摘要：\nsummary-v2"]
+    assert seen and "summary-v1" in seen[0]
+    assert "task-2" in seen[0] and "task-3" in seen[0]
+    assert any(message.get("content") == "persistent policy" for message in second)
+    assert not any(message.get("content") == "较早会话摘要：\nsummary-v1" for message in second)
+
+
+def test_compaction_coalesces_legacy_multiple_notes_and_fallbacks() -> None:
+    messages: list[dict[str, object]] = [
+        {"role": "system", "content": "system"},
+        {"role": "system", "content": "较早会话摘要：\nold-a"},
+        {
+            "role": "system",
+            "content": "较早会话因上下文预算已被裁剪；请依据当前工作区和近期消息继续。",
+        },
+    ]
+    for index in range(3):
+        messages.extend(make_turn(index, 300))
+    seen: list[str] = []
+
+    compacted = ContextManager(400, keep_recent_turns=1).compact(
+        messages, lambda text: seen.append(text) or "merged"
+    )
+
+    system_contents = [
+        str(message.get("content") or "")
+        for message in compacted
+        if message.get("role") == "system"
+    ]
+    assert system_contents == ["system", "较早会话摘要：\nmerged"]
+    assert "old-a" in seen[0]
+    assert "较早会话因上下文预算已被裁剪" in seen[0]
+
+
+def test_repeated_compaction_failure_discards_stale_summary_note() -> None:
+    manager = ContextManager(500, keep_recent_turns=2)
+    messages: list[dict[str, object]] = [{"role": "system", "content": "system"}]
+    for index in range(4):
+        messages.extend(make_turn(index, 300))
+    first = manager.compact(messages, lambda _text: "stale summary")
+    for index in range(4, 6):
+        first.extend(make_turn(index, 300))
+
+    def fail(_text: str) -> str:
+        raise RuntimeError("offline")
+
+    compacted = manager.compact(first, fail)
+    system_contents = [
+        str(message.get("content") or "")
+        for message in compacted
+        if message.get("role") == "system"
+    ]
+    assert system_contents == [
+        "system",
+        "较早会话因上下文预算已被裁剪；请依据当前工作区和近期消息继续。",
+    ]
+    assert "stale summary" not in "\n".join(system_contents)
