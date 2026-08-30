@@ -156,6 +156,9 @@ python -m coding_agent --no-browser
 | `compose_status` / `compose_logs` / `compose_verify` | 查询服务状态、读取有界日志、汇总健康结果 | 日志最多 1000 行并脱敏常见凭据 |
 | `compose_build` / `compose_pull` | 构建或拉取镜像 | 修改镜像状态，必须审批（完全访问模式除外） |
 | `compose_deploy` | 校验配置，执行 `up --detach --build`，立即验证 | 不跳过 preflight/verify，不声称未验证的成功 |
+| `compose_release` / `compose_releases` | 发布命名版本并查询活动版本、不可变镜像 ID 和审计记录 | 成功健康验证后才切换活动版本；版本号不可重复 |
+| `compose_rollback_plan` | 生成十分钟有效的一次性回滚预览 | 只读；明确来源版本、目标版本、服务和镜像影响 |
+| `compose_rollback` | 恢复目标镜像、重建服务并再次健康验证 | 必须使用预览生成的计划 ID，任何权限模式下都要求人工确认 |
 | `compose_restart` / `compose_stop` | 重启或停止服务 | 不执行 `down`，不删除容器、网络或数据卷 |
 
 常见 Git 工作流使用参数数组直接调用 Git，不经过 Shell。Git 结果使用结构化 JSON 返回，并区分非仓库、无内容可提交、认证失败、远端拒绝、无法快进/冲突和其他失败。`git_pull` 造成的文件变化也会进入当前对话的累计 Diff。
@@ -222,6 +225,22 @@ docker_context = "staging-host"
 3. 查询容器状态并验证 healthcheck。
 
 Docker CLI 运行在独立进程组中。用户取消后，Windows 使用 `taskkill /T`，macOS/Linux 向进程组发送终止信号；应用随后回收输出管道并返回稳定的 `operation_cancelled` 错误。取消不会自动执行 `compose down` 或回滚已经完成的阶段，因此已创建的镜像或已启动的容器会保留，便于审查现场。
+
+### 版本化发布与人工确认回滚
+
+`compose_release` 接受 `v1.4.0`、`2026.08.30` 等明确版本号，完成部署与健康验证后读取 `docker compose images --format json`，同时保存镜像引用和实际镜像 ID。活动版本因此不是一个容易漂移的标签别名，而是一条可以审计并用于恢复镜像标签的发布记录。
+
+发布与回滚状态保存在 Coding Agent 自身的 `.coding-agent/releases/` 下，并按工作区绝对路径哈希隔离，不写入被操作项目，也不会进入 Git。记录包含环境、版本、时间、服务、镜像 ID、健康结果和回滚事件，不保存凭据或环境变量值；文件使用同目录临时文件原子替换，格式损坏时拒绝继续发布，而不是静默覆盖历史。
+
+回滚采用强制两阶段协议：
+
+1. `compose_releases` 查询目标环境的活动版本和历史；
+2. `compose_rollback_plan` 生成十分钟有效、只能使用一次的计划 ID，并返回影响预览；
+3. `compose_rollback` 根据计划弹出人工确认。即使对话处于 `full` 模式，也必须由用户批准；
+4. 执行前记录当前镜像现场，确认目标镜像仍存在，恢复镜像标签并以 `--no-build` 重建服务；
+5. 重新执行健康验证，成功后才切换活动版本，并写入回滚审计记录。
+
+回滚只处理应用镜像与 Compose 服务，不自动回滚数据库 schema、数据卷或外部依赖。数据库迁移必须由项目提供向后兼容策略或独立人工流程。
 
 ## 安全模型
 
@@ -297,4 +316,5 @@ python -m pytest
 - DevOps 第一阶段只支持 Docker Compose；不包含 Kubernetes、多主机编排、CI 平台 API、流量切换或自动回滚。
 - 部署验证依据 Compose 容器状态与 healthcheck；没有 healthcheck 的服务只能确认处于 running，不能证明业务接口正确。
 - Compose 进度以阶段和已用时间为粒度，不解析 BuildKit 的逐层百分比；取消后已经完成的镜像层或容器状态不会自动回滚。
+- 已被 Docker 垃圾回收的历史镜像无法直接回滚；系统会在修改服务前检查镜像 ID 并以结构化错误停止。当前版本记录是本机控制面的审计数据，不替代远程镜像仓库的保留策略。
 - 不同兼容网关对 Chat Completions tool calling 的实现程度可能不同。

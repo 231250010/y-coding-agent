@@ -35,6 +35,31 @@ def write_compose(workspace: Path) -> Path:
     return path
 
 
+def add_release_responses(
+    runner: FakeDockerRunner,
+    image_id: str,
+    *,
+    health: str = "healthy",
+) -> None:
+    runner.add()
+    runner.add("service started")
+    runner.add(
+        json.dumps([{"Service": "web", "State": "running", "Health": health}])
+    )
+    runner.add(
+        json.dumps(
+            [
+                {
+                    "ContainerName": "demo-web-1",
+                    "Repository": "demo-web",
+                    "Tag": "latest",
+                    "ID": image_id,
+                }
+            ]
+        )
+    )
+
+
 def test_inspect_detects_stack_compose_and_safe_default(tmp_path: Path) -> None:
     write_compose(tmp_path)
     (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n", encoding="utf-8")
@@ -234,3 +259,93 @@ def test_unparseable_status_is_not_reported_as_an_empty_environment(tmp_path: Pa
         DevOpsService(tmp_path, runner).status()
 
     assert caught.value.code == "invalid_response"
+
+
+def test_versioned_release_records_immutable_images_outside_workspace(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    write_compose(workspace)
+    runner = FakeDockerRunner()
+    add_release_responses(runner, "sha256:111111111111")
+    state_root = tmp_path / "agent-state" / "releases"
+    service = DevOpsService(workspace, runner, release_state_root=state_root)
+
+    result = service.release("v1.0.0", services=["web"])
+    history = service.releases()
+
+    assert result["status"] == "released"
+    assert result["images"] == [
+        {
+            "id": "sha256:111111111111",
+            "reference": "demo-web:latest",
+            "container": "demo-web-1",
+        }
+    ]
+    assert history["active_version"] == "v1.0.0"
+    assert history["releases"][0]["version"] == "v1.0.0"
+    assert list(state_root.glob("*.json"))
+    assert not (workspace / ".coding-agent").exists()
+
+    with pytest.raises(DevOpsOperationError) as caught:
+        service.release("v1.0.0")
+    assert caught.value.code == "release_exists"
+
+
+def test_unhealthy_release_is_audited_but_not_activated(tmp_path: Path) -> None:
+    write_compose(tmp_path)
+    runner = FakeDockerRunner()
+    add_release_responses(runner, "sha256:222222222222", health="unhealthy")
+    service = DevOpsService(tmp_path, runner)
+
+    with pytest.raises(DevOpsOperationError) as caught:
+        service.release("v-bad")
+
+    assert caught.value.code == "release_unhealthy"
+    history = service.releases()
+    assert history["active_version"] is None
+    assert history["releases"][0]["status"] == "failed"
+
+
+def test_rollback_requires_one_time_plan_restores_images_and_audits_result(
+    tmp_path: Path,
+) -> None:
+    write_compose(tmp_path)
+    runner = FakeDockerRunner()
+    add_release_responses(runner, "sha256:111111111111")
+    add_release_responses(runner, "sha256:222222222222")
+    events: list[dict[str, object]] = []
+    service = DevOpsService(tmp_path, runner, on_progress=events.append)
+    service.release("v1")
+    service.release("v2")
+
+    plan = service.rollback_plan("v1")
+    assert plan["from_version"] == "v2"
+    assert plan["target_version"] == "v1"
+    assert plan["requires_human_confirmation"] is True
+
+    runner.add(
+        '[{"ContainerName":"demo-web-1","Repository":"demo-web","Tag":"latest",'
+        '"ID":"sha256:222222222222"}]'
+    )
+    runner.add("sha256:111111111111")
+    runner.add()
+    runner.add("recreated")
+    runner.add('[{"Service":"web","State":"running","Health":"healthy"}]')
+
+    result = service.rollback(plan["plan_id"])
+
+    assert result["status"] == "rolled_back"
+    assert result["active_version"] == "v1"
+    assert any(
+        call[0][-4:]
+        == ["image", "tag", "sha256:111111111111", "demo-web:latest"]
+        for call in runner.calls
+    )
+    history = service.releases()
+    assert history["active_version"] == "v1"
+    assert history["rollback_events"][0]["status"] == "rolled_back"
+    assert any(event["operation"] == "compose_rollback" for event in events)
+
+    with pytest.raises(DevOpsOperationError) as caught:
+        service.rollback(plan["plan_id"])
+    assert caught.value.code == "rollback_plan_used"

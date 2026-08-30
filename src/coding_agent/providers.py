@@ -59,6 +59,7 @@ def build_default_tool_provider(
     approver: Callable[..., bool] | None = None,
     is_cancelled: Callable[[], bool] | None = None,
     on_progress: Callable[[dict[str, Any]], None] | None = None,
+    devops_state_root: Path | None = None,
     approval_mode: str = "risk",
     change_tracker: ConversationChangeTracker | None = None,
 ) -> ToolProvider:
@@ -89,6 +90,7 @@ def build_default_tool_provider(
             workspace,
             is_cancelled=is_cancelled,
             on_progress=on_progress,
+            release_state_root=devops_state_root,
         ),
         approver=approver,
         approval_mode=approval_mode,

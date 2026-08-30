@@ -54,6 +54,9 @@ def test_default_provider_adds_git_and_devops_tools_for_selected_workspace(tmp_p
     assert "devops_inspect" in names
     assert "compose_deploy" in names
     assert "compose_verify" in names
+    assert "compose_release" in names
+    assert "compose_rollback_plan" in names
+    assert "compose_rollback" in names
     assert getattr(tools, "change_tracker", None) is tracker
 
 

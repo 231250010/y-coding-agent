@@ -39,6 +39,31 @@ class StubDevOpsService:
     restart = build
     stop = build
 
+    def release(
+        self, version: str, environment: str | None, services: list[str] | None
+    ) -> dict[str, Any]:
+        return self._call("release", version, environment, services)
+
+    def releases(self, environment: str | None, limit: int) -> dict[str, Any]:
+        return self._call("releases", environment, limit)
+
+    def rollback_plan(self, version: str, environment: str | None) -> dict[str, Any]:
+        return self._call("rollback_plan", version, environment)
+
+    def rollback_preview(self, plan_id: str) -> dict[str, Any]:
+        self.calls.append(("rollback_preview", (plan_id,)))
+        if self.failure:
+            raise self.failure
+        return {
+            "plan_id": plan_id,
+            "environment": "production",
+            "from_version": "v2",
+            "target_version": "v1",
+        }
+
+    def rollback(self, plan_id: str) -> dict[str, Any]:
+        return self._call("rollback", plan_id)
+
     def verify(self, environment: str | None = None) -> dict[str, Any]:
         return self._call("verify", environment)
 
@@ -58,6 +83,10 @@ def test_exposes_complete_compose_lifecycle() -> None:
         "compose_build",
         "compose_pull",
         "compose_deploy",
+        "compose_release",
+        "compose_releases",
+        "compose_rollback_plan",
+        "compose_rollback",
         "compose_verify",
         "compose_restart",
         "compose_stop",
@@ -107,6 +136,42 @@ def test_full_mode_executes_mutation_and_returns_structured_json() -> None:
     assert service.calls == [("build", (None, ["web"]))]
 
 
+def test_rollback_always_requires_human_confirmation_even_in_full_mode() -> None:
+    service = StubDevOpsService()
+    approvals: list[tuple[str, RiskLevel, str]] = []
+    provider = DevOpsToolProvider(
+        service,  # type: ignore[arg-type]
+        approval_mode="full",
+        approver=lambda *args: approvals.append(args) or False,
+    )
+
+    result = provider.execute("compose_rollback", {"plan_id": "a" * 32})
+
+    assert result.ok is False
+    assert "未批准回滚" in (result.error or "")
+    assert service.calls == [("rollback_preview", ("a" * 32,))]
+    assert "production" in approvals[0][2]
+    assert "v2" in approvals[0][2]
+    assert "v1" in approvals[0][2]
+
+
+def test_approved_rollback_uses_the_previewed_one_time_plan() -> None:
+    service = StubDevOpsService()
+    provider = DevOpsToolProvider(
+        service,  # type: ignore[arg-type]
+        approval_mode="full",
+        approver=lambda _command, _risk, _reason: True,
+    )
+
+    result = provider.execute("compose_rollback", {"plan_id": "b" * 32})
+
+    assert result.ok is True
+    assert service.calls == [
+        ("rollback_preview", ("b" * 32,)),
+        ("rollback", ("b" * 32,)),
+    ]
+
+
 def test_argument_validation_happens_before_service_call() -> None:
     service = StubDevOpsService()
     provider = DevOpsToolProvider(service)  # type: ignore[arg-type]
@@ -114,6 +179,8 @@ def test_argument_validation_happens_before_service_call() -> None:
     assert provider.execute("compose_logs", {"tail": 0}).ok is False
     assert provider.execute("compose_logs", {"extra": True}).error == "未知参数: extra"
     assert provider.execute("compose_build", {"services": "web"}).ok is False
+    assert provider.execute("compose_release", {}).error == "缺少参数: version"
+    assert provider.execute("compose_rollback", {"plan_id": "short"}).ok is False
     assert service.calls == []
 
 
@@ -127,4 +194,3 @@ def test_service_errors_remain_machine_readable_and_redacted_output_is_bounded()
     assert result.ok is False
     assert result.error == "docker_unreachable: 无法连接"
     assert result.output.startswith("deta")
-

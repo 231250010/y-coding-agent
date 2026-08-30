@@ -111,6 +111,8 @@ def test_devops_progress_rail_and_cancel_control_are_wired() -> None:
     assert 'role="progressbar"' in html
     assert 'id="cancel-operation"' in html
     assert "function renderProgress(task)" in javascript
+    assert 'compose_release: "RELEASE"' in javascript
+    assert 'compose_rollback: "ROLLBACK"' in javascript
     assert 'document.querySelector("#cancel-operation").addEventListener("click", stopTask)' in javascript
     assert ".operation-stages" in css
     assert "@media (prefers-reduced-motion: reduce)" in css

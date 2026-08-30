@@ -27,7 +27,15 @@ class DevOpsToolProvider:
     """Structured Docker Compose development, deployment, and operations tools."""
 
     _MUTATIONS = frozenset(
-        {"compose_build", "compose_pull", "compose_deploy", "compose_restart", "compose_stop"}
+        {
+            "compose_build",
+            "compose_pull",
+            "compose_deploy",
+            "compose_release",
+            "compose_rollback",
+            "compose_restart",
+            "compose_stop",
+        }
     )
 
     def __init__(
@@ -58,6 +66,12 @@ class DevOpsToolProvider:
         }
         common = {"environment": environment}
         writes = {"environment": environment, "services": services}
+        version = {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": "发布版本，例如 v1.4.0 或 2026.08.30",
+        }
         self._schemas = [
             self._schema("devops_inspect", "识别项目技术栈、Compose 文件和已配置部署环境。"),
             self._schema(
@@ -97,6 +111,45 @@ class DevOpsToolProvider:
                 _object_schema(writes),
             ),
             self._schema(
+                "compose_release",
+                "发布命名版本，部署验证后记录不可变镜像 ID 并设为活动版本。",
+                _object_schema({**writes, "version": version}, ["version"]),
+            ),
+            self._schema(
+                "compose_releases",
+                "只读查询发布版本、当前活动版本和回滚审计记录。",
+                _object_schema(
+                    {
+                        **common,
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 100,
+                            "default": 20,
+                        },
+                    }
+                ),
+            ),
+            self._schema(
+                "compose_rollback_plan",
+                "只读生成十分钟有效的一次性回滚预览；执行回滚前必须先调用。",
+                _object_schema({**common, "version": version}, ["version"]),
+            ),
+            self._schema(
+                "compose_rollback",
+                "执行一次性回滚计划。无论权限模式如何，都必须由用户人工确认。",
+                _object_schema(
+                    {
+                        "plan_id": {
+                            "type": "string",
+                            "minLength": 32,
+                            "maxLength": 32,
+                        }
+                    },
+                    ["plan_id"],
+                ),
+            ),
+            self._schema(
                 "compose_verify",
                 "根据容器运行状态和 Compose health 状态验证部署结果。",
                 _object_schema(common),
@@ -131,6 +184,16 @@ class DevOpsToolProvider:
             "compose_deploy": lambda args: self.service.deploy(
                 args.get("environment"), args.get("services")
             ),
+            "compose_release": lambda args: self.service.release(
+                args["version"], args.get("environment"), args.get("services")
+            ),
+            "compose_releases": lambda args: self.service.releases(
+                args.get("environment"), args.get("limit", 20)
+            ),
+            "compose_rollback_plan": lambda args: self.service.rollback_plan(
+                args["version"], args.get("environment")
+            ),
+            "compose_rollback": lambda args: self.service.rollback(args["plan_id"]),
             "compose_verify": lambda args: self.service.verify(args.get("environment")),
             "compose_restart": lambda args: self.service.restart(
                 args.get("environment"), args.get("services")
@@ -161,10 +224,10 @@ class DevOpsToolProvider:
         validation_error = self._validate(arguments, self._schema_by_name[name])
         if validation_error:
             return ToolResult(False, error=validation_error)
-        approval_error = self._approve(name, arguments)
-        if approval_error:
-            return ToolResult(False, error=approval_error)
         try:
+            approval_error = self._approve(name, arguments)
+            if approval_error:
+                return ToolResult(False, error=approval_error)
             data = handler(arguments)
             output = json.dumps(data, ensure_ascii=False, indent=2)
             if len(output) > self.max_output:
@@ -177,6 +240,17 @@ class DevOpsToolProvider:
             return ToolResult(False, output=output, error=f"{exc.code}: {exc}")
 
     def _approve(self, name: str, arguments: dict[str, Any]) -> str | None:
+        if name == "compose_rollback":
+            preview = self.service.rollback_preview(arguments["plan_id"])
+            label = f"compose_rollback {json.dumps(preview, ensure_ascii=False, separators=(',', ':'))}"
+            reason = (
+                f"人工确认：将 {preview['environment']} 从 "
+                f"{preview.get('from_version') or '未记录版本'} 回滚到 {preview['target_version']}；"
+                "会重新标记镜像并重建服务，不会自动回滚数据库"
+            )
+            if self.approver(label, RiskLevel.REVIEW, reason):
+                return None
+            return f"用户未批准回滚操作: {reason}"
         if name not in self._MUTATIONS or self.approval_mode == "full":
             return None
         environment = arguments.get("environment") or "默认环境"
@@ -194,6 +268,9 @@ class DevOpsToolProvider:
         unknown = sorted(set(arguments) - set(properties))
         if unknown:
             return f"未知参数: {', '.join(unknown)}"
+        for required in schema.get("required", []):
+            if required not in arguments:
+                return f"缺少参数: {required}"
         for key, value in arguments.items():
             spec = properties[key]
             kind = spec.get("type")

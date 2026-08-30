@@ -25,6 +25,7 @@ HTTP 服务固定监听 `127.0.0.1`，浏览器负责项目、对话、审批、
 | `git_tools.py` | Git Schema、参数验证和权限矩阵 |
 | `devops_service.py` | Docker Compose 项目识别、环境选择、命令执行和结果归一化 |
 | `devops_tools.py` | DevOps Schema、参数验证、审批矩阵和结构化错误 |
+| `release_store.py` | 按工作区隔离的发布版本、回滚计划与审计事件原子存储 |
 | `changes.py` | 对话级文件快照和累计 Diff |
 | `context.py` | 上下文估算、摘要与保守裁剪 |
 | `session_store.py` | 本机会话原子持久化与兼容加载 |
@@ -79,6 +80,8 @@ CodingAgent
 Git 命令使用参数数组和 `shell=False`。路径必须位于当前工作目录内；pull 固定使用 fast-forward-only；push 只使用已有上游或 `origin/当前分支`。hard reset、clean、force push 和删除远端引用不属于结构化能力，并由通用命令安全规则拒绝。
 
 DevOps 控制面以 Docker Compose 为第一阶段目标。默认使用当前 Docker Context，也可从工作区内的 `coding-agent.toml` 选择预配置的远程 Context。Compose 文件必须位于工作区，环境、Context 和服务名称只接受安全字符；命令使用参数数组和 `shell=False`。部署先校验配置，再执行后台构建启动，最后将容器 state 和 health 归一化为逐服务验证结果。日志限制行数并对常见 Token、密码和 URL 用户信息进行脱敏。
+
+版本发布在健康验证后记录 Compose 镜像引用和镜像 ID，并按环境维护活动版本。回滚计划与执行分离：计划只读、十分钟过期且只能使用一次；执行工具无视 `full` 权限豁免，始终创建人工审批。回滚先记录当前镜像现场，再检查历史镜像、恢复标签、使用 `--no-build` 重建服务并重新验证。数据库和数据卷明确位于自动回滚边界之外。
 
 无工作目录的对话不暴露本地工具，仍可处理一般问答。
 

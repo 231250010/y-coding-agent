@@ -7,10 +7,14 @@ import signal
 import subprocess
 import time
 import tomllib
+import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+from .release_store import ReleaseStore
 
 
 DevOpsRunner = Callable[[Sequence[str], Path, float], subprocess.CompletedProcess[str]]
@@ -60,11 +64,13 @@ class DevOpsService:
         *,
         is_cancelled: CancelCallback | None = None,
         on_progress: ProgressCallback | None = None,
+        release_state_root: Path | None = None,
     ) -> None:
         self.workspace = workspace.resolve()
         self._runner = runner
         self.is_cancelled = is_cancelled or (lambda: False)
         self.on_progress = on_progress or (lambda _data: None)
+        self.release_store = ReleaseStore(self.workspace, release_state_root)
 
     def inspect(self) -> dict[str, Any]:
         config = self._load_config()
@@ -242,6 +248,463 @@ class DevOpsService:
         self, environment: str | None = None, services: Sequence[str] | None = None
     ) -> dict[str, Any]:
         return self._write_operation("stop", environment, services, timeout=180)
+
+    def release(
+        self,
+        version: str,
+        environment: str | None = None,
+        services: Sequence[str] | None = None,
+    ) -> dict[str, Any]:
+        release_version = self._validate_version(version)
+        config, selected = self._resolve_environment(environment)
+        compose_file = self._require_compose(config)
+        normalized = self._validate_services(services)
+        state = self._load_release_state()
+        if self._find_release(state, selected.name, release_version) is not None:
+            raise DevOpsOperationError(
+                "release_exists",
+                f"环境 {selected.name} 已存在版本 {release_version}",
+            )
+
+        self._run(
+            self._compose_command(selected, compose_file, ["config", "--quiet"]),
+            timeout=30,
+            progress=self._step("compose_release", selected, "validate", "校验发布配置", 1, 5),
+        )
+        deploy_result = self._run(
+            self._compose_command(
+                selected, compose_file, ["up", "--detach", "--build", *normalized]
+            ),
+            timeout=600,
+            progress=self._step("compose_release", selected, "deploy", "构建并启动发布版本", 2, 5),
+        )
+        verification = self._verify(
+            selected,
+            compose_file,
+            self._step("compose_release", selected, "verify", "验证发布健康状态", 3, 5),
+        )
+        images = self._capture_images(
+            selected,
+            compose_file,
+            normalized,
+            self._step("compose_release", selected, "inventory", "锁定不可变镜像标识", 4, 5),
+        )
+        if not images:
+            raise DevOpsOperationError(
+                "release_inventory_empty", "没有发现可记录的 Compose 服务镜像"
+            )
+
+        record = {
+            "version": release_version,
+            "environment": selected.name,
+            "created_at": self._now(),
+            "compose_file": self._relative(compose_file),
+            "services": normalized,
+            "images": images,
+            "healthy": bool(verification["healthy"]),
+            "status": "released" if verification["healthy"] else "failed",
+        }
+        self._local_progress_step(
+            self._step("compose_release", selected, "record", "写入发布审计记录", 5, 5),
+            lambda: self._record_release(state, record),
+        )
+        if not verification["healthy"]:
+            raise DevOpsOperationError(
+                "release_unhealthy",
+                f"版本 {release_version} 已记录，但健康验证未通过，未设为活动版本",
+                output=json.dumps(verification, ensure_ascii=False),
+            )
+        return {
+            "version": release_version,
+            "environment": selected.name,
+            "status": "released",
+            "images": images,
+            "output": self._combined_output(deploy_result),
+            "verification": verification,
+        }
+
+    def releases(self, environment: str | None = None, limit: int = 20) -> dict[str, Any]:
+        if not 1 <= limit <= 100:
+            raise DevOpsOperationError("invalid_argument", "发布记录数量必须在 1 到 100 之间")
+        config, selected = self._resolve_environment(environment)
+        self._require_compose(config)
+        state = self._load_release_state()
+        records = [
+            item
+            for item in state["releases"]
+            if item.get("environment") == selected.name
+        ]
+        return {
+            "environment": selected.name,
+            "active_version": state["active"].get(selected.name),
+            "releases": list(reversed(records[-limit:])),
+            "rollback_events": list(
+                reversed(
+                    [
+                        item
+                        for item in state["rollback_events"]
+                        if item.get("environment") == selected.name
+                    ][-limit:]
+                )
+            ),
+        }
+
+    def rollback_plan(self, version: str, environment: str | None = None) -> dict[str, Any]:
+        release_version = self._validate_version(version)
+        config, selected = self._resolve_environment(environment)
+        self._require_compose(config)
+        state = self._load_release_state()
+        target = self._find_release(state, selected.name, release_version)
+        if target is None or target.get("status") != "released":
+            raise DevOpsOperationError(
+                "release_not_found",
+                f"环境 {selected.name} 没有可回滚的成功版本 {release_version}",
+            )
+        active = state["active"].get(selected.name)
+        if active == release_version:
+            raise DevOpsOperationError(
+                "already_active", f"版本 {release_version} 已是环境 {selected.name} 的活动版本"
+            )
+        images = self._validated_release_images(target.get("images"))
+        services = self._validate_services(target.get("services"))
+        now = datetime.now(timezone.utc)
+        plan = {
+            "plan_id": uuid.uuid4().hex,
+            "environment": selected.name,
+            "from_version": active,
+            "target_version": release_version,
+            "services": services,
+            "images": images,
+            "created_at": now.isoformat(),
+            "expires_at": (now + timedelta(minutes=10)).isoformat(),
+            "used_at": None,
+        }
+        state["rollback_plans"] = [
+            item for item in state["rollback_plans"] if not self._plan_expired(item, now)
+        ][-19:]
+        state["rollback_plans"].append(plan)
+        self._save_release_state(state)
+        return self._plan_preview(plan)
+
+    def rollback_preview(self, plan_id: str) -> dict[str, Any]:
+        plan_key = self._validate_plan_id(plan_id)
+        state = self._load_release_state()
+        plan = self._find_plan(state, plan_key)
+        self._validate_plan(plan)
+        assert plan is not None
+        return self._plan_preview(plan)
+
+    def rollback(self, plan_id: str) -> dict[str, Any]:
+        plan_key = self._validate_plan_id(plan_id)
+        state = self._load_release_state()
+        plan = self._find_plan(state, plan_key)
+        self._validate_plan(plan)
+        assert plan is not None
+        config, selected = self._resolve_environment(str(plan["environment"]))
+        compose_file = self._require_compose(config)
+        images = self._validated_release_images(plan.get("images"))
+        services = self._validate_services(plan.get("services"))
+
+        self._local_progress_step(
+            self._step("compose_rollback", selected, "plan", "锁定一次性回滚计划", 1, 5),
+            lambda: self._mark_plan_used(state, plan),
+        )
+        event = {
+            "plan_id": plan_key,
+            "environment": selected.name,
+            "from_version": plan.get("from_version"),
+            "target_version": plan["target_version"],
+            "started_at": self._now(),
+            "finished_at": None,
+            "status": "running",
+            "before_images": [],
+        }
+        state["rollback_events"].append(event)
+        self._save_release_state(state)
+        try:
+            event["before_images"] = self._capture_images(
+                selected,
+                compose_file,
+                services,
+                self._step("compose_rollback", selected, "snapshot", "记录当前镜像现场", 2, 5),
+            )
+            self._save_release_state(state)
+            total_tags = len(images)
+            image_progress = self._step(
+                "compose_rollback", selected, "images", "恢复目标版本镜像标签", 3, 5
+            )
+            image_started = time.monotonic()
+            self._emit_progress(image_progress, "running", elapsed=0.0)
+            try:
+                for index, image in enumerate(images, start=1):
+                    image_progress = self._step(
+                        "compose_rollback",
+                        selected,
+                        "images",
+                        f"恢复目标镜像 {index}/{total_tags}",
+                        3,
+                        5,
+                    )
+                    self._emit_progress(
+                        image_progress,
+                        "running",
+                        elapsed=time.monotonic() - image_started,
+                    )
+                    self._run(
+                        self._docker_command(selected, ["image", "inspect", image["id"]]),
+                        timeout=30,
+                    )
+                    self._run(
+                        self._docker_command(
+                            selected, ["image", "tag", image["id"], image["reference"]]
+                        ),
+                        timeout=30,
+                    )
+            except DevOpsOperationError:
+                self._emit_progress(
+                    image_progress,
+                    "failed",
+                    elapsed=time.monotonic() - image_started,
+                )
+                raise
+            self._emit_progress(
+                image_progress,
+                "completed",
+                elapsed=time.monotonic() - image_started,
+                completed=True,
+            )
+            result = self._run(
+                self._compose_command(
+                    selected,
+                    compose_file,
+                    ["up", "--detach", "--no-build", *services],
+                ),
+                timeout=300,
+                progress=self._step("compose_rollback", selected, "recreate", "按目标版本重建服务", 4, 5),
+            )
+            verification = self._verify(
+                selected,
+                compose_file,
+                self._step("compose_rollback", selected, "verify", "验证回滚后的健康状态", 5, 5),
+            )
+            event["status"] = "rolled_back" if verification["healthy"] else "unhealthy"
+            event["finished_at"] = self._now()
+            event["verification"] = verification
+            if verification["healthy"]:
+                state["active"][selected.name] = plan["target_version"]
+            self._save_release_state(state)
+            if not verification["healthy"]:
+                raise DevOpsOperationError(
+                    "rollback_unhealthy",
+                    "回滚命令已执行，但健康验证未通过",
+                    output=json.dumps(verification, ensure_ascii=False),
+                )
+            return {
+                "environment": selected.name,
+                "from_version": plan.get("from_version"),
+                "active_version": plan["target_version"],
+                "status": "rolled_back",
+                "output": self._combined_output(result),
+                "verification": verification,
+            }
+        except DevOpsOperationError as exc:
+            if event["status"] == "running":
+                event["status"] = "cancelled" if exc.code == "operation_cancelled" else "failed"
+                event["finished_at"] = self._now()
+                event["error_code"] = exc.code
+                self._save_release_state(state)
+            raise
+
+    def _capture_images(
+        self,
+        selected: DevOpsEnvironment,
+        compose_file: Path,
+        services: Sequence[str],
+        progress: ProgressStep,
+    ) -> list[dict[str, str]]:
+        result = self._run(
+            self._compose_command(
+                selected, compose_file, ["images", "--format", "json", *services]
+            ),
+            timeout=60,
+            progress=progress,
+        )
+        images: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in self._parse_json_records(result.stdout):
+            image_id = str(item.get("ID") or item.get("Id") or item.get("ImageID") or "")
+            repository = str(item.get("Repository") or "")
+            tag = str(item.get("Tag") or "")
+            if not image_id or not repository or repository == "<none>" or not tag or tag == "<none>":
+                continue
+            self._validate_image_id(image_id)
+            reference = self._validate_image_reference(f"{repository}:{tag}")
+            key = (image_id, reference)
+            if key in seen:
+                continue
+            seen.add(key)
+            images.append(
+                {
+                    "id": image_id,
+                    "reference": reference,
+                    "container": str(
+                        item.get("ContainerName") or item.get("Container") or ""
+                    )[:200],
+                }
+            )
+        return images
+
+    def _record_release(self, state: dict[str, Any], record: dict[str, Any]) -> None:
+        state["releases"].append(record)
+        if record["healthy"]:
+            state["active"][record["environment"]] = record["version"]
+        self._save_release_state(state)
+
+    def _mark_plan_used(self, state: dict[str, Any], plan: dict[str, Any]) -> None:
+        plan["used_at"] = self._now()
+        self._save_release_state(state)
+
+    def _local_progress_step(
+        self, progress: ProgressStep, action: Callable[[], None]
+    ) -> None:
+        self._check_cancelled()
+        started = time.monotonic()
+        self._emit_progress(progress, "running", elapsed=0.0)
+        try:
+            action()
+        except DevOpsOperationError:
+            self._emit_progress(progress, "failed", elapsed=time.monotonic() - started)
+            raise
+        except (OSError, UnicodeError, ValueError) as exc:
+            self._emit_progress(progress, "failed", elapsed=time.monotonic() - started)
+            raise DevOpsOperationError(
+                "release_store_failed", f"发布审计记录写入失败: {exc}"
+            ) from exc
+        self._emit_progress(
+            progress,
+            "completed",
+            elapsed=time.monotonic() - started,
+            completed=True,
+        )
+
+    def _load_release_state(self) -> dict[str, Any]:
+        try:
+            return self.release_store.load()
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise DevOpsOperationError(
+                "release_store_failed", f"发布审计记录读取失败: {exc}"
+            ) from exc
+
+    def _save_release_state(self, state: dict[str, Any]) -> None:
+        try:
+            self.release_store.save(state)
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise DevOpsOperationError(
+                "release_store_failed", f"发布审计记录写入失败: {exc}"
+            ) from exc
+
+    @staticmethod
+    def _find_release(
+        state: dict[str, Any], environment: str, version: str
+    ) -> dict[str, Any] | None:
+        return next(
+            (
+                item
+                for item in state["releases"]
+                if item.get("environment") == environment and item.get("version") == version
+            ),
+            None,
+        )
+
+    @staticmethod
+    def _find_plan(state: dict[str, Any], plan_id: str) -> dict[str, Any] | None:
+        return next(
+            (item for item in state["rollback_plans"] if item.get("plan_id") == plan_id),
+            None,
+        )
+
+    def _validate_plan(self, plan: dict[str, Any] | None) -> None:
+        if plan is None:
+            raise DevOpsOperationError("rollback_plan_not_found", "回滚计划不存在")
+        if plan.get("used_at"):
+            raise DevOpsOperationError("rollback_plan_used", "回滚计划已经执行，不能重复使用")
+        if self._plan_expired(plan, datetime.now(timezone.utc)):
+            raise DevOpsOperationError("rollback_plan_expired", "回滚计划已过期，请重新预览")
+
+    @staticmethod
+    def _plan_expired(plan: dict[str, Any], now: datetime) -> bool:
+        expires_at = plan.get("expires_at")
+        if not isinstance(expires_at, str):
+            return True
+        try:
+            expiry = datetime.fromisoformat(expires_at)
+        except ValueError:
+            return True
+        return expiry.tzinfo is None or expiry <= now
+
+    @staticmethod
+    def _plan_preview(plan: dict[str, Any]) -> dict[str, Any]:
+        images = plan.get("images") if isinstance(plan.get("images"), list) else []
+        return {
+            "plan_id": plan["plan_id"],
+            "environment": plan["environment"],
+            "from_version": plan.get("from_version"),
+            "target_version": plan["target_version"],
+            "services": list(plan.get("services") or []),
+            "images": [
+                {
+                    "reference": item.get("reference"),
+                    "image_id": str(item.get("id") or "")[:20],
+                }
+                for item in images
+                if isinstance(item, dict)
+            ],
+            "expires_at": plan["expires_at"],
+            "requires_human_confirmation": True,
+            "warning": "回滚会重新标记镜像并重建服务；不会删除数据卷，也不会自动回滚数据库。",
+        }
+
+    def _validated_release_images(self, value: Any) -> list[dict[str, str]]:
+        if not isinstance(value, list) or not value:
+            raise DevOpsOperationError("release_inventory_empty", "目标版本没有镜像记录")
+        images: list[dict[str, str]] = []
+        for item in value:
+            if not isinstance(item, dict):
+                raise DevOpsOperationError("release_inventory_invalid", "目标版本镜像记录无效")
+            image_id = self._validate_image_id(str(item.get("id") or ""))
+            reference = self._validate_image_reference(str(item.get("reference") or ""))
+            images.append({"id": image_id, "reference": reference})
+        return images
+
+    @staticmethod
+    def _validate_version(value: str) -> str:
+        if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", value):
+            raise DevOpsOperationError(
+                "invalid_argument", "版本号只能包含字母、数字、点、下划线和连字符"
+            )
+        return value
+
+    @staticmethod
+    def _validate_plan_id(value: str) -> str:
+        if not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{32}", value):
+            raise DevOpsOperationError("invalid_argument", "回滚计划 ID 无效")
+        return value
+
+    @staticmethod
+    def _validate_image_id(value: str) -> str:
+        if not value or not re.fullmatch(r"[A-Za-z0-9:_.-]{6,200}", value):
+            raise DevOpsOperationError("release_inventory_invalid", "镜像 ID 无效")
+        return value
+
+    @staticmethod
+    def _validate_image_reference(value: str) -> str:
+        if not value or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_./:@-]{0,254}", value):
+            raise DevOpsOperationError("release_inventory_invalid", "镜像引用无效")
+        return value
+
+    @staticmethod
+    def _now() -> str:
+        return datetime.now(timezone.utc).isoformat()
 
     def _write_operation(
         self,

@@ -504,6 +504,7 @@ class WebRuntime:
             on_progress=lambda data: self._handle_agent_event(
                 task.id, "tool_progress", data
             ),
+            devops_state_root=self.settings_root / ".coding-agent" / "releases",
             approval_mode=task.permission_mode,
             change_tracker=task.change_tracker,
         )
