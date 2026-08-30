@@ -107,12 +107,12 @@ class DevOpsToolProvider:
             ),
             self._schema(
                 "compose_deploy",
-                "校验配置后执行 Compose 后台构建部署，并立即验证服务状态。",
+                "校验配置后执行 Compose 后台构建部署，等待健康状态收敛并运行应用探针。",
                 _object_schema(writes),
             ),
             self._schema(
                 "compose_release",
-                "发布命名版本，部署验证后记录不可变镜像 ID 并设为活动版本。",
+                "执行 Git/检查门禁后发布命名版本，记录来源证据和不可变镜像 ID。",
                 _object_schema({**writes, "version": version}, ["version"]),
             ),
             self._schema(

@@ -71,7 +71,19 @@ def test_inspect_detects_stack_compose_and_safe_default(tmp_path: Path) -> None:
     assert result["compose_file"] == "compose.yaml"
     assert result["dockerfile"] is True
     assert result["default_environment"] == "local"
-    assert result["environments"] == [{"name": "local", "docker_context": "current"}]
+    assert result["environments"] == [
+        {
+            "name": "local",
+            "docker_context": "current",
+            "health_timeout_seconds": 60.0,
+            "http_probes": [],
+        }
+    ]
+    assert result["release_policy"] == {
+        "require_git": False,
+        "require_clean_worktree": False,
+        "checks": [],
+    }
     assert result["ready"] is True
 
 
@@ -140,6 +152,69 @@ def test_deploy_validates_then_verifies_healthy_services(tmp_path: Path) -> None
     assert runner.calls[1][0][-5:] == ["up", "--detach", "--build", "web", "worker"]
     assert result["verification"]["healthy"] is True
     assert all(item["ready"] for item in result["verification"]["services"])
+
+
+def test_deploy_waits_for_health_to_converge(tmp_path: Path) -> None:
+    write_compose(tmp_path)
+    (tmp_path / "coding-agent.toml").write_text(
+        """[devops]
+compose_file = "compose.yaml"
+
+[devops.environments.local]
+health_timeout_seconds = 2
+health_interval_seconds = 0.1
+""",
+        encoding="utf-8",
+    )
+    runner = FakeDockerRunner()
+    runner.add()
+    runner.add("started")
+    runner.add('[{"Service":"web","State":"running","Health":"starting"}]')
+    runner.add('[{"Service":"web","State":"running","Health":"healthy"}]')
+
+    result = DevOpsService(tmp_path, runner).deploy()
+
+    assert result["verification"]["healthy"] is True
+    assert result["verification"]["attempts"] == 2
+    assert result["verification"]["timed_out"] is False
+
+
+def test_verify_runs_configured_http_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_compose(tmp_path)
+    (tmp_path / "coding-agent.toml").write_text(
+        """[devops]
+compose_file = "compose.yaml"
+
+[devops.environments.local]
+[[devops.environments.local.http_probes]]
+name = "web-api"
+url = "http://127.0.0.1:8088/health"
+expected_status = 204
+timeout_seconds = 1
+""",
+        encoding="utf-8",
+    )
+    runner = FakeDockerRunner()
+    runner.add('[{"Service":"web","State":"running","Health":"healthy"}]')
+
+    class Response:
+        status = 204
+
+        def __enter__(self) -> "Response":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    monkeypatch.setattr("coding_agent.devops_service.urlrequest.urlopen", lambda *_args, **_kwargs: Response())
+
+    result = DevOpsService(tmp_path, runner).verify()
+
+    assert result["healthy"] is True
+    assert result["http_probes"][0]["name"] == "web-api"
+    assert result["http_probes"][0]["status"] == 204
 
 
 def test_deploy_reports_real_phase_transitions(tmp_path: Path) -> None:
@@ -289,6 +364,83 @@ def test_versioned_release_records_immutable_images_outside_workspace(tmp_path: 
     with pytest.raises(DevOpsOperationError) as caught:
         service.release("v1.0.0")
     assert caught.value.code == "release_exists"
+
+
+def test_mutations_are_serialized_per_workspace_environment(tmp_path: Path) -> None:
+    write_compose(tmp_path)
+    first = DevOpsService(tmp_path, FakeDockerRunner())
+    second = DevOpsService(tmp_path, FakeDockerRunner())
+    _config, selected = first._resolve_environment(None)
+
+    with first._environment_operation(selected, "compose_release"):
+        with pytest.raises(DevOpsOperationError) as caught:
+            second.deploy()
+
+    assert caught.value.code == "environment_busy"
+    assert "compose_release" in caught.value.output
+
+
+def test_release_gate_blocks_dirty_worktree_before_deploy(tmp_path: Path) -> None:
+    write_compose(tmp_path)
+    (tmp_path / "coding-agent.toml").write_text(
+        """[devops]
+compose_file = "compose.yaml"
+
+[devops.release]
+require_git = true
+require_clean_worktree = true
+""",
+        encoding="utf-8",
+    )
+    gate = FakeDockerRunner()
+    gate.add(str(tmp_path))
+    gate.add("a" * 40)
+    gate.add("main")
+    gate.add(" M app.py")
+    docker = FakeDockerRunner()
+
+    with pytest.raises(DevOpsOperationError) as caught:
+        DevOpsService(tmp_path, docker, gate_runner=gate).release("v1")
+
+    assert caught.value.code == "release_gate_failed"
+    assert "未提交变更" in str(caught.value)
+    assert docker.calls == []
+
+
+def test_release_audits_git_compose_and_required_checks(tmp_path: Path) -> None:
+    write_compose(tmp_path)
+    (tmp_path / "coding-agent.toml").write_text(
+        """[devops]
+compose_file = "compose.yaml"
+
+[devops.release]
+require_git = true
+require_clean_worktree = true
+[[devops.release.checks]]
+name = "unit-tests"
+command = ["python", "-m", "pytest", "-q"]
+timeout_seconds = 60
+""",
+        encoding="utf-8",
+    )
+    gate = FakeDockerRunner()
+    gate.add(str(tmp_path))
+    gate.add("b" * 40)
+    gate.add("main")
+    gate.add("")
+    gate.add("12 passed")
+    docker = FakeDockerRunner()
+    add_release_responses(docker, "sha256:333333333333")
+
+    service = DevOpsService(tmp_path, docker, gate_runner=gate)
+    result = service.release("v1")
+    recorded = service.releases()["releases"][0]
+
+    assert result["provenance"]["passed"] is True
+    assert result["provenance"]["git"]["commit"] == "b" * 40
+    assert len(result["provenance"]["compose_sha256"]) == 64
+    assert result["provenance"]["checks"][0]["passed"] is True
+    assert recorded["provenance"] == result["provenance"]
 
 
 def test_unhealthy_release_is_audited_but_not_activated(tmp_path: Path) -> None:

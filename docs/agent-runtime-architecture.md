@@ -75,13 +75,13 @@ CodingAgent
 
 - 文件与命令：浏览、读取、搜索、写入、精确替换和受控命令；
 - Git：status、diff、log、branches、create branch、stage、unstage、commit、pull 和 push。
-- DevOps：inspect、preflight、build、pull、deploy、status、logs、verify、restart 和 stop。
+- DevOps：inspect、preflight、build、pull、deploy、status、logs、verify、restart、stop、版本发布和两阶段回滚。
 
 Git 命令使用参数数组和 `shell=False`。路径必须位于当前工作目录内；pull 固定使用 fast-forward-only；push 只使用已有上游或 `origin/当前分支`。hard reset、clean、force push 和删除远端引用不属于结构化能力，并由通用命令安全规则拒绝。
 
-DevOps 控制面以 Docker Compose 为第一阶段目标。默认使用当前 Docker Context，也可从工作区内的 `coding-agent.toml` 选择预配置的远程 Context。Compose 文件必须位于工作区，环境、Context 和服务名称只接受安全字符；命令使用参数数组和 `shell=False`。部署先校验配置，再执行后台构建启动，最后将容器 state 和 health 归一化为逐服务验证结果。日志限制行数并对常见 Token、密码和 URL 用户信息进行脱敏。
+DevOps 控制面以 Docker Compose 为第一阶段目标。默认使用当前 Docker Context，也可从工作区内的 `coding-agent.toml` 选择预配置的远程 Context。Compose 文件必须位于工作区，环境、Context 和服务名称只接受安全字符；命令使用参数数组和 `shell=False`。部署先校验配置，再执行后台构建启动，等待容器 health 收敛后执行可选 HTTP 探针。日志限制行数并对常见 Token、密码和 URL 用户信息进行脱敏。
 
-版本发布在健康验证后记录 Compose 镜像引用和镜像 ID，并按环境维护活动版本。回滚计划与执行分离：计划只读、十分钟过期且只能使用一次；执行工具无视 `full` 权限豁免，始终创建人工审批。回滚先记录当前镜像现场，再检查历史镜像、恢复标签、使用 `--no-build` 重建服务并重新验证。数据库和数据卷明确位于自动回滚边界之外。
+版本发布先执行配置化门禁，采集 Git Commit、分支、脏工作区状态、Compose 摘要和检查结果；失败时不执行 Docker 变更。健康验证后记录 Compose 镜像引用和镜像 ID，并按环境维护活动版本。回滚计划与执行分离：计划只读、十分钟过期且只能使用一次；执行工具无视 `full` 权限豁免，始终创建人工审批。回滚先记录当前镜像现场，再检查历史镜像、恢复标签、使用 `--no-build` 重建服务并重新验证。数据库和数据卷明确位于自动回滚边界之外。
 
 无工作目录的对话不暴露本地工具，仍可处理一般问答。
 
@@ -109,7 +109,7 @@ DevOps 的构建、拉取、部署、重启和停止在 `request` 与 `risk` 中
 
 ## 并发与取消
 
-HTTP 服务按请求使用线程。每个运行中的对话有独立取消事件；Agent 会在模型调用和工具调用边界检查。通用命令和 Docker CLI 都使用独立进程组，超时或取消时终止整个进程树。DevOps 服务在 0.2 秒轮询周期内观察取消信号，并以约 0.5 秒间隔上报阶段耗时；进度只保存在内存状态中，避免长构建期间反复写会话文件。会话锁只保护共享状态，不包围模型请求或长时间命令。
+HTTP 服务按请求使用线程。每个运行中的对话有独立取消事件；Agent 会在模型调用和工具调用边界检查。通用命令和 Docker CLI 都使用独立进程组，超时或取消时终止整个进程树。DevOps 服务在 0.2 秒轮询周期内观察取消信号，并以约 0.5 秒间隔上报阶段耗时；进度只保存在内存状态中，避免长构建期间反复写会话文件。所有变更型 DevOps 操作还按工作区、Docker Context 和环境持有进程内互斥锁，冲突请求立即返回 `environment_busy`；取消和异常路径通过 `finally` 释放锁。
 
 ## 测试边界
 

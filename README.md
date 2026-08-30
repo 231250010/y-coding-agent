@@ -156,7 +156,7 @@ python -m coding_agent --no-browser
 | `compose_status` / `compose_logs` / `compose_verify` | 查询服务状态、读取有界日志、汇总健康结果 | 日志最多 1000 行并脱敏常见凭据 |
 | `compose_build` / `compose_pull` | 构建或拉取镜像 | 修改镜像状态，必须审批（完全访问模式除外） |
 | `compose_deploy` | 校验配置，执行 `up --detach --build`，立即验证 | 不跳过 preflight/verify，不声称未验证的成功 |
-| `compose_release` / `compose_releases` | 发布命名版本并查询活动版本、不可变镜像 ID 和审计记录 | 成功健康验证后才切换活动版本；版本号不可重复 |
+| `compose_release` / `compose_releases` | 执行门禁、发布命名版本并查询来源证据、活动版本和镜像 ID | 门禁与健康验证均成功后才切换活动版本；版本号不可重复 |
 | `compose_rollback_plan` | 生成十分钟有效的一次性回滚预览 | 只读；明确来源版本、目标版本、服务和镜像影响 |
 | `compose_rollback` | 恢复目标镜像、重建服务并再次健康验证 | 必须使用预览生成的计划 ID，任何权限模式下都要求人工确认 |
 | `compose_restart` / `compose_stop` | 重启或停止服务 | 不执行 `down`，不删除容器、网络或数据卷 |
@@ -196,12 +196,29 @@ compose_file = "compose.yaml"
 default_environment = "local"
 
 [devops.environments.local]
+health_timeout_seconds = 45
+health_interval_seconds = 2
+
+[[devops.environments.local.http_probes]]
+name = "web-api"
+url = "http://127.0.0.1:8088/health"
+expected_status = 200
+timeout_seconds = 3
 
 [devops.environments.staging]
 docker_context = "staging-host"
+
+[devops.release]
+require_git = true
+require_clean_worktree = true
+
+[[devops.release.checks]]
+name = "unit-tests"
+command = ["python", "-m", "pytest", "-q"]
+timeout_seconds = 300
 ```
 
-其中 `staging-host` 应由开发者提前使用 `docker context create` 配置。配置只保存 Context 名称，不保存主机密码、私钥、Token 或环境变量值。Compose 路径必须位于当前工作区，环境名、Context 名和服务名均经过白名单字符校验，所有 Docker 调用使用参数数组并设置超时，不经过 Shell。
+其中 `staging-host` 应由开发者提前使用 `docker context create` 配置。健康验证会在超时范围内等待 Compose healthcheck 从 `starting` 收敛，并在容器就绪后执行可选 HTTP 探针。发布门禁可以强制要求 Git 提交、干净工作区和一组参数数组形式的检查命令。配置只保存 Context 名称，不保存主机密码、私钥、Token 或环境变量值；所有 Docker 和门禁命令都不经过 Shell。
 
 推荐在网页中这样下达任务：
 
@@ -214,7 +231,7 @@ docker_context = "staging-host"
 - 环境识别、预检、状态、日志和健康验证属于只读查询，在三种权限模式下自动执行。
 - 构建、拉取、部署、重启和停止会改变镜像、容器或服务状态，在 `request` 和 `risk` 模式下均要求明确批准。
 - 只有 `full` 模式自动执行这些状态变更；它仍不提供删除数据卷、远程主机任意命令、提权或破坏 Git 历史的结构化能力。
-- `compose_stop` 只停止服务，不执行 `down -v`；第一阶段不提供自动回滚，失败时保留现场供开发者审查日志和状态。
+- `compose_stop` 只停止服务，不执行 `down -v`；不提供失败后的无人值守自动回滚，失败时保留现场供开发者审查日志和状态。
 
 ### 部署进度与取消语义
 
@@ -222,15 +239,17 @@ docker_context = "staging-host"
 
 1. 校验 Compose 配置；
 2. 构建镜像并启动服务；
-3. 查询容器状态并验证 healthcheck。
+3. 等待容器 healthcheck 收敛，并执行配置的 HTTP 应用探针。
 
 Docker CLI 运行在独立进程组中。用户取消后，Windows 使用 `taskkill /T`，macOS/Linux 向进程组发送终止信号；应用随后回收输出管道并返回稳定的 `operation_cancelled` 错误。取消不会自动执行 `compose down` 或回滚已经完成的阶段，因此已创建的镜像或已启动的容器会保留，便于审查现场。
 
 ### 版本化发布与人工确认回滚
 
-`compose_release` 接受 `v1.4.0`、`2026.08.30` 等明确版本号，完成部署与健康验证后读取 `docker compose images --format json`，同时保存镜像引用和实际镜像 ID。活动版本因此不是一个容易漂移的标签别名，而是一条可以审计并用于恢复镜像标签的发布记录。
+`compose_release` 接受 `v1.4.0`、`2026.08.30` 等明确版本号。任何 Docker 变更前都会执行发布门禁；通过后才部署、等待健康收敛并读取 `docker compose images --format json`。活动版本因此不是一个容易漂移的标签别名，而是一条可以审计并用于恢复镜像标签的发布记录。
 
-发布与回滚状态保存在 Coding Agent 自身的 `.coding-agent/releases/` 下，并按工作区绝对路径哈希隔离，不写入被操作项目，也不会进入 Git。记录包含环境、版本、时间、服务、镜像 ID、健康结果和回滚事件，不保存凭据或环境变量值；文件使用同目录临时文件原子替换，格式损坏时拒绝继续发布，而不是静默覆盖历史。
+发布与回滚状态保存在 Coding Agent 自身的 `.coding-agent/releases/` 下，并按工作区绝对路径哈希隔离，不写入被操作项目，也不会进入 Git。记录包含环境、版本、时间、Git Commit/分支/脏状态、Compose SHA-256、检查结果、服务、镜像 ID、健康结果和回滚事件，不保存凭据或环境变量值；文件使用同目录临时文件原子替换，格式损坏时拒绝继续发布，而不是静默覆盖历史。
+
+所有会改变 Compose 状态或发布审计记录的操作，都按“工作区 + Docker Context + 环境”获取非阻塞互斥锁。同一环境已有部署、发布或回滚时，后续操作返回 `environment_busy` 和当前操作摘要；取消或结束后锁一定释放，不会让两个会话同时修改同一环境。
 
 回滚采用强制两阶段协议：
 
@@ -313,8 +332,8 @@ python -m pytest
 - 只处理 UTF-8 文本文件，不编辑二进制文件。
 - 不自动提交 Git；结构化提交只会在模型明确调用且权限规则允许时执行。
 - 暂不提供任务级 Git worktree 隔离、Git 图形操作栏、PR 托管平台集成、merge/rebase 结构化工具、插件系统或自主网络搜索。
-- DevOps 第一阶段只支持 Docker Compose；不包含 Kubernetes、多主机编排、CI 平台 API、流量切换或自动回滚。
-- 部署验证依据 Compose 容器状态与 healthcheck；没有 healthcheck 的服务只能确认处于 running，不能证明业务接口正确。
+- DevOps 第一阶段只支持 Docker Compose；不包含 Kubernetes、多主机编排、CI 平台 API、流量切换或失败后的无人值守自动回滚。
+- 部署验证支持 Compose healthcheck 和配置化 HTTP 探针；未配置二者的服务只能确认处于 running，不能证明业务接口正确。
 - Compose 进度以阶段和已用时间为粒度，不解析 BuildKit 的逐层百分比；取消后已经完成的镜像层或容器状态不会自动回滚。
 - 已被 Docker 垃圾回收的历史镜像无法直接回滚；系统会在修改服务前检查镜像 ID 并以结构化错误停止。当前版本记录是本机控制面的审计数据，不替代远程镜像仓库的保留策略。
 - 不同兼容网关对 Chat Completions tool calling 的实现程度可能不同。

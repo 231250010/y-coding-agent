@@ -1,18 +1,23 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import signal
 import subprocess
+import threading
 import time
 import tomllib
 import uuid
 from collections.abc import Callable, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib import error as urlerror
+from urllib import request as urlrequest
 
 from .release_store import ReleaseStore
 
@@ -20,6 +25,7 @@ from .release_store import ReleaseStore
 DevOpsRunner = Callable[[Sequence[str], Path, float], subprocess.CompletedProcess[str]]
 ProgressCallback = Callable[[dict[str, Any]], None]
 CancelCallback = Callable[[], bool]
+GateRunner = Callable[[Sequence[str], Path, float], subprocess.CompletedProcess[str]]
 COMPOSE_FILES = ("compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml")
 MANIFESTS = ("package.json", "pyproject.toml", "Cargo.toml", "go.mod", "pom.xml", "build.gradle")
 
@@ -35,6 +41,31 @@ class DevOpsOperationError(RuntimeError):
 class DevOpsEnvironment:
     name: str
     docker_context: str | None = None
+    health_timeout_seconds: float = 60.0
+    health_interval_seconds: float = 2.0
+    http_probes: tuple["HttpProbe", ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class HttpProbe:
+    name: str
+    url: str
+    expected_status: int = 200
+    timeout_seconds: float = 3.0
+
+
+@dataclass(frozen=True, slots=True)
+class ReleaseCheck:
+    name: str
+    command: tuple[str, ...]
+    timeout_seconds: float = 300.0
+
+
+@dataclass(frozen=True, slots=True)
+class ReleasePolicy:
+    require_git: bool = False
+    require_clean_worktree: bool = False
+    checks: tuple[ReleaseCheck, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +73,7 @@ class DevOpsProjectConfig:
     compose_file: Path | None
     default_environment: str
     environments: dict[str, DevOpsEnvironment]
+    release_policy: ReleasePolicy
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +89,10 @@ class ProgressStep:
 class DevOpsService:
     """Structured Docker Compose control plane for one developer workspace."""
 
+    _locks_guard = threading.Lock()
+    _environment_locks: dict[str, threading.Lock] = {}
+    _active_operations: dict[str, dict[str, Any]] = {}
+
     def __init__(
         self,
         workspace: Path,
@@ -65,12 +101,14 @@ class DevOpsService:
         is_cancelled: CancelCallback | None = None,
         on_progress: ProgressCallback | None = None,
         release_state_root: Path | None = None,
+        gate_runner: GateRunner | None = None,
     ) -> None:
         self.workspace = workspace.resolve()
         self._runner = runner
         self.is_cancelled = is_cancelled or (lambda: False)
         self.on_progress = on_progress or (lambda _data: None)
         self.release_store = ReleaseStore(self.workspace, release_state_root)
+        self._gate_runner = gate_runner
 
     def inspect(self) -> dict[str, Any]:
         config = self._load_config()
@@ -94,9 +132,19 @@ class DevOpsService:
             "compose_file": self._relative(config.compose_file) if config.compose_file else None,
             "default_environment": config.default_environment,
             "environments": [
-                {"name": item.name, "docker_context": item.docker_context or "current"}
+                {
+                    "name": item.name,
+                    "docker_context": item.docker_context or "current",
+                    "health_timeout_seconds": item.health_timeout_seconds,
+                    "http_probes": [probe.name for probe in item.http_probes],
+                }
                 for item in config.environments.values()
             ],
+            "release_policy": {
+                "require_git": config.release_policy.require_git,
+                "require_clean_worktree": config.release_policy.require_clean_worktree,
+                "checks": [check.name for check in config.release_policy.checks],
+            },
             "ready": config.compose_file is not None,
         }
 
@@ -180,6 +228,13 @@ class DevOpsService:
     def deploy(
         self, environment: str | None = None, services: Sequence[str] | None = None
     ) -> dict[str, Any]:
+        _config, selected = self._resolve_environment(environment)
+        with self._environment_operation(selected, "compose_deploy"):
+            return self._deploy_unlocked(environment, services)
+
+    def _deploy_unlocked(
+        self, environment: str | None = None, services: Sequence[str] | None = None
+    ) -> dict[str, Any]:
         config, selected = self._resolve_environment(environment)
         compose_file = self._require_compose(config)
         normalized = self._validate_services(services)
@@ -220,7 +275,65 @@ class DevOpsService:
         compose_file: Path,
         progress: ProgressStep,
     ) -> dict[str, Any]:
-        services = self._status_records(selected, compose_file, progress)
+        started = time.monotonic()
+        deadline = started + selected.health_timeout_seconds
+        self._emit_progress(progress, "running", elapsed=0.0)
+        attempts = 0
+        results: list[dict[str, Any]] = []
+        probe_results: list[dict[str, Any]] = []
+        timed_out = False
+        while True:
+            self._check_cancelled()
+            attempts += 1
+            try:
+                services = self._status_records(selected, compose_file, None)
+                results = self._service_health(services)
+                containers_ready = bool(results) and all(item["ready"] for item in results)
+                terminal_failure = any(
+                    item["state"] in {"dead", "exited", "removing"}
+                    or item["health"] == "unhealthy"
+                    for item in results
+                )
+                probe_results = (
+                    self._run_http_probes(selected.http_probes) if containers_ready else []
+                )
+            except DevOpsOperationError as exc:
+                self._emit_progress(
+                    progress,
+                    "cancelled" if exc.code == "operation_cancelled" else "failed",
+                    elapsed=time.monotonic() - started,
+                )
+                raise
+            probes_ready = all(item["ready"] for item in probe_results)
+            if containers_ready and probes_ready:
+                break
+            now = time.monotonic()
+            if terminal_failure or now >= deadline:
+                timed_out = not terminal_failure and now >= deadline
+                break
+            self._emit_progress(progress, "running", elapsed=now - started)
+            time.sleep(min(selected.health_interval_seconds, max(0.0, deadline - now)))
+
+        healthy = bool(results) and all(item["ready"] for item in results) and all(
+            item["ready"] for item in probe_results
+        )
+        self._emit_progress(
+            progress,
+            "completed",
+            elapsed=time.monotonic() - started,
+            completed=True,
+        )
+        return {
+            "environment": selected.name,
+            "healthy": healthy,
+            "attempts": attempts,
+            "timed_out": timed_out,
+            "services": results,
+            "http_probes": probe_results,
+        }
+
+    @staticmethod
+    def _service_health(services: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         for item in services:
             state = str(item.get("State") or item.get("state") or "").lower()
@@ -233,11 +346,35 @@ class DevOpsService:
                     "ready": state == "running" and health in {"", "healthy"},
                 }
             )
-        return {
-            "environment": selected.name,
-            "healthy": bool(results) and all(item["ready"] for item in results),
-            "services": results,
-        }
+        return results
+
+    def _run_http_probes(self, probes: Sequence[HttpProbe]) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        for probe in probes:
+            self._check_cancelled()
+            started = time.monotonic()
+            status: int | None = None
+            error = ""
+            try:
+                with urlrequest.urlopen(probe.url, timeout=probe.timeout_seconds) as response:
+                    status = int(response.status)
+            except urlerror.HTTPError as exc:
+                status = int(exc.code)
+                error = f"HTTP {exc.code}"
+            except (OSError, ValueError, urlerror.URLError) as exc:
+                error = str(exc)[:300]
+            results.append(
+                {
+                    "name": probe.name,
+                    "url": probe.url,
+                    "expected_status": probe.expected_status,
+                    "status": status,
+                    "ready": status == probe.expected_status,
+                    "elapsed_seconds": round(time.monotonic() - started, 3),
+                    "error": error,
+                }
+            )
+        return results
 
     def restart(
         self, environment: str | None = None, services: Sequence[str] | None = None
@@ -255,6 +392,16 @@ class DevOpsService:
         environment: str | None = None,
         services: Sequence[str] | None = None,
     ) -> dict[str, Any]:
+        _config, selected = self._resolve_environment(environment)
+        with self._environment_operation(selected, "compose_release"):
+            return self._release_unlocked(version, environment, services)
+
+    def _release_unlocked(
+        self,
+        version: str,
+        environment: str | None = None,
+        services: Sequence[str] | None = None,
+    ) -> dict[str, Any]:
         release_version = self._validate_version(version)
         config, selected = self._resolve_environment(environment)
         compose_file = self._require_compose(config)
@@ -266,28 +413,33 @@ class DevOpsService:
                 f"环境 {selected.name} 已存在版本 {release_version}",
             )
 
+        gate: dict[str, Any] = {}
+        self._local_progress_step(
+            self._step("compose_release", selected, "gate", "执行发布门禁", 1, 6),
+            lambda: gate.update(self._release_gate(config, compose_file)),
+        )
         self._run(
             self._compose_command(selected, compose_file, ["config", "--quiet"]),
             timeout=30,
-            progress=self._step("compose_release", selected, "validate", "校验发布配置", 1, 5),
+            progress=self._step("compose_release", selected, "validate", "校验发布配置", 2, 6),
         )
         deploy_result = self._run(
             self._compose_command(
                 selected, compose_file, ["up", "--detach", "--build", *normalized]
             ),
             timeout=600,
-            progress=self._step("compose_release", selected, "deploy", "构建并启动发布版本", 2, 5),
+            progress=self._step("compose_release", selected, "deploy", "构建并启动发布版本", 3, 6),
         )
         verification = self._verify(
             selected,
             compose_file,
-            self._step("compose_release", selected, "verify", "验证发布健康状态", 3, 5),
+            self._step("compose_release", selected, "verify", "验证发布健康状态", 4, 6),
         )
         images = self._capture_images(
             selected,
             compose_file,
             normalized,
-            self._step("compose_release", selected, "inventory", "锁定不可变镜像标识", 4, 5),
+            self._step("compose_release", selected, "inventory", "锁定不可变镜像标识", 5, 6),
         )
         if not images:
             raise DevOpsOperationError(
@@ -303,9 +455,10 @@ class DevOpsService:
             "images": images,
             "healthy": bool(verification["healthy"]),
             "status": "released" if verification["healthy"] else "failed",
+            "provenance": gate,
         }
         self._local_progress_step(
-            self._step("compose_release", selected, "record", "写入发布审计记录", 5, 5),
+            self._step("compose_release", selected, "record", "写入发布审计记录", 6, 6),
             lambda: self._record_release(state, record),
         )
         if not verification["healthy"]:
@@ -321,6 +474,7 @@ class DevOpsService:
             "images": images,
             "output": self._combined_output(deploy_result),
             "verification": verification,
+            "provenance": gate,
         }
 
     def releases(self, environment: str | None = None, limit: int = 20) -> dict[str, Any]:
@@ -350,6 +504,13 @@ class DevOpsService:
         }
 
     def rollback_plan(self, version: str, environment: str | None = None) -> dict[str, Any]:
+        _config, selected = self._resolve_environment(environment)
+        with self._environment_operation(selected, "compose_rollback_plan"):
+            return self._rollback_plan_unlocked(version, environment)
+
+    def _rollback_plan_unlocked(
+        self, version: str, environment: str | None = None
+    ) -> dict[str, Any]:
         release_version = self._validate_version(version)
         config, selected = self._resolve_environment(environment)
         self._require_compose(config)
@@ -395,6 +556,16 @@ class DevOpsService:
         return self._plan_preview(plan)
 
     def rollback(self, plan_id: str) -> dict[str, Any]:
+        plan_key = self._validate_plan_id(plan_id)
+        state = self._load_release_state()
+        plan = self._find_plan(state, plan_key)
+        self._validate_plan(plan)
+        assert plan is not None
+        _config, selected = self._resolve_environment(str(plan["environment"]))
+        with self._environment_operation(selected, "compose_rollback"):
+            return self._rollback_unlocked(plan_id)
+
+    def _rollback_unlocked(self, plan_id: str) -> dict[str, Any]:
         plan_key = self._validate_plan_id(plan_id)
         state = self._load_release_state()
         plan = self._find_plan(state, plan_key)
@@ -514,6 +685,95 @@ class DevOpsService:
                 event["error_code"] = exc.code
                 self._save_release_state(state)
             raise
+
+    def _release_gate(
+        self, config: DevOpsProjectConfig, compose_file: Path
+    ) -> dict[str, Any]:
+        policy = config.release_policy
+        evidence: dict[str, Any] = {
+            "evaluated_at": self._now(),
+            "compose_sha256": hashlib.sha256(compose_file.read_bytes()).hexdigest(),
+            "git": {"available": False, "commit": None, "branch": None, "dirty": None},
+            "checks": [],
+            "passed": False,
+        }
+        failures: list[str] = []
+        root = self._run_gate_command(["git", "rev-parse", "--show-toplevel"], 15)
+        if root.returncode == 0:
+            commit = self._run_gate_command(["git", "rev-parse", "HEAD"], 15)
+            branch = self._run_gate_command(["git", "branch", "--show-current"], 15)
+            status = self._run_gate_command(["git", "status", "--porcelain"], 30)
+            git_ok = commit.returncode == 0 and status.returncode == 0
+            dirty = bool(status.stdout.strip()) if status.returncode == 0 else None
+            evidence["git"] = {
+                "available": git_ok,
+                "root": root.stdout.strip(),
+                "commit": commit.stdout.strip() or None,
+                "branch": branch.stdout.strip() or None,
+                "dirty": dirty,
+            }
+        git_evidence = evidence["git"]
+        if (policy.require_git or policy.require_clean_worktree) and not git_evidence["available"]:
+            failures.append("当前工作区没有可验证的 Git 提交")
+        if policy.require_clean_worktree and git_evidence["dirty"] is True:
+            failures.append("Git 工作区存在未提交变更")
+
+        for check in policy.checks:
+            started = time.monotonic()
+            result = self._run_gate_command(check.command, check.timeout_seconds)
+            item = {
+                "name": check.name,
+                "command": list(check.command),
+                "passed": result.returncode == 0,
+                "returncode": result.returncode,
+                "elapsed_seconds": round(time.monotonic() - started, 2),
+                "output": self._redact(
+                    "\n".join(filter(None, (result.stdout.strip(), result.stderr.strip())))
+                )[:2000],
+            }
+            evidence["checks"].append(item)
+            if not item["passed"]:
+                failures.append(f"发布检查未通过: {check.name}")
+
+        evidence["passed"] = not failures
+        evidence["failures"] = failures
+        if failures:
+            raise DevOpsOperationError(
+                "release_gate_failed",
+                "发布门禁未通过: " + "；".join(failures),
+                output=json.dumps(evidence, ensure_ascii=False, indent=2),
+            )
+        return evidence
+
+    def _run_gate_command(
+        self, command: Sequence[str], timeout: float
+    ) -> subprocess.CompletedProcess[str]:
+        self._check_cancelled()
+        try:
+            if self._gate_runner is not None:
+                result = self._gate_runner(command, self.workspace, timeout)
+            else:
+                result = subprocess.run(
+                    list(command),
+                    cwd=self.workspace,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    shell=False,
+                    timeout=timeout,
+                    check=False,
+                )
+        except FileNotFoundError:
+            return subprocess.CompletedProcess(list(command), 127, "", "command not found")
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout.decode("utf-8", "replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+            stderr = exc.stderr.decode("utf-8", "replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "command timed out")
+            return subprocess.CompletedProcess(
+                list(command), 124, stdout, stderr
+            )
+        self._check_cancelled()
+        return result
 
     def _capture_images(
         self,
@@ -706,7 +966,54 @@ class DevOpsService:
     def _now() -> str:
         return datetime.now(timezone.utc).isoformat()
 
+    @contextmanager
+    def _environment_operation(
+        self, selected: DevOpsEnvironment, operation: str
+    ) -> Any:
+        key = "|".join(
+            (
+                str(self.workspace).casefold(),
+                (selected.docker_context or "current").casefold(),
+                selected.name.casefold(),
+            )
+        )
+        with self._locks_guard:
+            lock = self._environment_locks.setdefault(key, threading.Lock())
+            active = self._active_operations.get(key)
+            if not lock.acquire(blocking=False):
+                detail = json.dumps(active or {}, ensure_ascii=False)
+                raise DevOpsOperationError(
+                    "environment_busy",
+                    f"环境 {selected.name} 正在执行其他变更操作，请等待完成或取消后重试",
+                    output=detail,
+                )
+            self._active_operations[key] = {
+                "operation": operation,
+                "environment": selected.name,
+                "started_at": self._now(),
+            }
+        try:
+            yield
+        finally:
+            with self._locks_guard:
+                self._active_operations.pop(key, None)
+                lock.release()
+
     def _write_operation(
+        self,
+        operation: str,
+        environment: str | None,
+        services: Sequence[str] | None,
+        *,
+        timeout: float,
+    ) -> dict[str, Any]:
+        _config, selected = self._resolve_environment(environment)
+        with self._environment_operation(selected, f"compose_{operation}"):
+            return self._write_operation_unlocked(
+                operation, environment, services, timeout=timeout
+            )
+
+    def _write_operation_unlocked(
         self,
         operation: str,
         environment: str | None,
@@ -779,14 +1086,116 @@ class DevOpsService:
                 if not isinstance(context, str):
                     raise DevOpsOperationError("config_invalid", f"环境 {name} 的 docker_context 必须是字符串")
                 self._validate_name(context, "Docker Context")
-            environments[name] = DevOpsEnvironment(name, context)
+            health_timeout = self._config_number(
+                value.get("health_timeout_seconds", 60),
+                f"环境 {name} 的 health_timeout_seconds",
+                minimum=0,
+                maximum=600,
+            )
+            health_interval = self._config_number(
+                value.get("health_interval_seconds", 2),
+                f"环境 {name} 的 health_interval_seconds",
+                minimum=0.1,
+                maximum=30,
+            )
+            probes = self._parse_http_probes(name, value.get("http_probes", []))
+            environments[name] = DevOpsEnvironment(
+                name, context, health_timeout, health_interval, probes
+            )
         if not environments:
             environments["local"] = DevOpsEnvironment("local")
 
         default_environment = raw.get("default_environment", next(iter(environments)))
         if not isinstance(default_environment, str) or default_environment not in environments:
             raise DevOpsOperationError("config_invalid", "默认环境未在 devops.environments 中定义")
-        return DevOpsProjectConfig(compose_file, default_environment, environments)
+        release_policy = self._parse_release_policy(raw.get("release", {}))
+        return DevOpsProjectConfig(
+            compose_file, default_environment, environments, release_policy
+        )
+
+    def _parse_http_probes(self, environment: str, value: Any) -> tuple[HttpProbe, ...]:
+        if not isinstance(value, list) or len(value) > 20:
+            raise DevOpsOperationError(
+                "config_invalid", f"环境 {environment} 的 http_probes 必须是有界数组"
+            )
+        probes: list[HttpProbe] = []
+        for index, item in enumerate(value, start=1):
+            if not isinstance(item, dict):
+                raise DevOpsOperationError("config_invalid", "http_probes 每一项必须是 TOML 表")
+            name = item.get("name", f"probe-{index}")
+            url = item.get("url")
+            if not isinstance(name, str) or not name or len(name) > 80:
+                raise DevOpsOperationError("config_invalid", "HTTP 探针名称无效")
+            if not isinstance(url, str) or not re.fullmatch(r"https?://[^\s]{1,500}", url):
+                raise DevOpsOperationError("config_invalid", f"HTTP 探针 {name} 的 URL 无效")
+            status = item.get("expected_status", 200)
+            if not isinstance(status, int) or isinstance(status, bool) or not 100 <= status <= 599:
+                raise DevOpsOperationError("config_invalid", f"HTTP 探针 {name} 的状态码无效")
+            timeout = self._config_number(
+                item.get("timeout_seconds", 3),
+                f"HTTP 探针 {name} 的 timeout_seconds",
+                minimum=0.1,
+                maximum=30,
+            )
+            probes.append(HttpProbe(name, url, status, timeout))
+        return tuple(probes)
+
+    def _parse_release_policy(self, value: Any) -> ReleasePolicy:
+        if not isinstance(value, dict):
+            raise DevOpsOperationError("config_invalid", "devops.release 必须是 TOML 表")
+        require_git = self._config_bool(value.get("require_git", False), "release.require_git")
+        require_clean = self._config_bool(
+            value.get("require_clean_worktree", False),
+            "release.require_clean_worktree",
+        )
+        raw_checks = value.get("checks", [])
+        if not isinstance(raw_checks, list) or len(raw_checks) > 20:
+            raise DevOpsOperationError("config_invalid", "release.checks 必须是有界数组")
+        checks: list[ReleaseCheck] = []
+        for index, item in enumerate(raw_checks, start=1):
+            if not isinstance(item, dict):
+                raise DevOpsOperationError("config_invalid", "release.checks 每一项必须是 TOML 表")
+            name = item.get("name", f"check-{index}")
+            command = item.get("command")
+            if not isinstance(name, str) or not name or len(name) > 80:
+                raise DevOpsOperationError("config_invalid", "发布检查名称无效")
+            if (
+                not isinstance(command, list)
+                or not command
+                or len(command) > 30
+                or any(not isinstance(part, str) or not part or len(part) > 300 for part in command)
+            ):
+                raise DevOpsOperationError(
+                    "config_invalid", f"发布检查 {name} 的 command 必须是非空字符串数组"
+                )
+            timeout = self._config_number(
+                item.get("timeout_seconds", 300),
+                f"发布检查 {name} 的 timeout_seconds",
+                minimum=1,
+                maximum=1800,
+            )
+            checks.append(ReleaseCheck(name, tuple(command), timeout))
+        return ReleasePolicy(require_git, require_clean, tuple(checks))
+
+    @staticmethod
+    def _config_bool(value: Any, label: str) -> bool:
+        if not isinstance(value, bool):
+            raise DevOpsOperationError("config_invalid", f"{label} 必须是布尔值")
+        return value
+
+    @staticmethod
+    def _config_number(
+        value: Any, label: str, *, minimum: float, maximum: float
+    ) -> float:
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not minimum <= float(value) <= maximum
+        ):
+            raise DevOpsOperationError(
+                "config_invalid", f"{label} 必须在 {minimum} 到 {maximum} 之间"
+            )
+        return float(value)
 
     def _resolve_environment(
         self, environment: str | None

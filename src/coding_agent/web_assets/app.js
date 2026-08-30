@@ -260,7 +260,7 @@ const operationLabels = {
 const operationPhases = {
   compose_preflight: ["连接引擎", "检查版本", "校验配置", "服务清单"],
   compose_deploy: ["校验配置", "构建启动", "健康验证"],
-  compose_release: ["校验配置", "构建启动", "健康验证", "锁定镜像", "发布记录"],
+  compose_release: ["发布门禁", "校验配置", "构建启动", "健康验证", "锁定镜像", "发布记录"],
   compose_rollback: ["确认计划", "现场快照", "恢复镜像", "重建服务", "健康验证"],
 };
 
