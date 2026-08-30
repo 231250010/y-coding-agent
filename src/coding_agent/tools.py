@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .changes import Capture, ChangeSet, ConversationChangeTracker
+from .permissions import normalize_permission_mode
 from .safety import CommandPolicy, RiskLevel
 
 
@@ -38,17 +39,19 @@ class ToolResult:
 
 
 class PathGuard:
-    def __init__(self, workspace: Path) -> None:
+    def __init__(self, workspace: Path, *, allow_outside: bool = False) -> None:
         self.workspace = workspace.resolve()
+        self.allow_outside = allow_outside
 
     def resolve(self, user_path: str, *, must_exist: bool = False) -> Path:
         candidate_input = Path(user_path)
         candidate = candidate_input if candidate_input.is_absolute() else self.workspace / candidate_input
         resolved = candidate.resolve(strict=False)
-        try:
-            resolved.relative_to(self.workspace)
-        except ValueError as exc:
-            raise ValueError(f"路径超出工作区: {user_path}") from exc
+        if not self.allow_outside or not candidate_input.is_absolute():
+            try:
+                resolved.relative_to(self.workspace)
+            except ValueError as exc:
+                raise ValueError(f"路径超出工作区: {user_path}") from exc
 
         # Existing parents can contain symlinks; resolve() above follows them.
         if must_exist and not resolved.exists():
@@ -81,13 +84,13 @@ class ToolRegistry:
         *,
         approver: ApprovalCallback | None = None,
         is_cancelled: CancelCallback | None = None,
-        approval_mode: str = "ask",
+        approval_mode: str = "risk",
         max_output: int = MAX_TOOL_OUTPUT,
         change_tracker: ConversationChangeTracker | None = None,
     ) -> None:
         self.approver = approver or (lambda _command, _risk, _reason: False)
         self.is_cancelled = is_cancelled or (lambda: False)
-        self.approval_mode = approval_mode
+        self.approval_mode = normalize_permission_mode(approval_mode)
         self.max_output = max_output
         self.change_tracker = change_tracker
         if workspace is None:
@@ -97,7 +100,7 @@ class ToolRegistry:
             self._tools = {}
             return
         self.workspace = workspace.resolve()
-        self.guard = PathGuard(self.workspace)
+        self.guard = PathGuard(self.workspace, allow_outside=self.approval_mode == "full")
         self.policy = CommandPolicy(self.workspace)
         self._tools = {tool.name: tool for tool in self._build_tools()}
 
@@ -114,9 +117,18 @@ class ToolRegistry:
         if validation_error:
             return ToolResult(False, error=validation_error)
 
+        if name in {"write_file", "replace_text"} and self.approval_mode == "request":
+            path = str(arguments.get("path", ""))
+            if not self.approver(
+                f"{name} {path}",
+                RiskLevel.REVIEW,
+                "请求批准模式下，修改文件需要确认",
+            ):
+                return ToolResult(False, error="用户未批准文件修改")
+
         capture: Capture | None = None
         try:
-            if self.change_tracker and name in {"write_file", "replace_text"}:
+            if self.change_tracker and name in {"write_file", "replace_text"} and self._inside_workspace(str(arguments["path"])):
                 capture = self.change_tracker.capture_paths([str(arguments["path"])])
             elif self.change_tracker and name == "run_command":
                 capture = self.change_tracker.capture_workspace()
@@ -160,7 +172,10 @@ class ToolRegistry:
         return None
 
     def _build_tools(self) -> list[LocalTool]:
-        common_path = {"type": "string", "description": "相对于工作区的路径"}
+        path_description = "相对于工作区的路径"
+        if self.approval_mode == "full":
+            path_description += "；完全访问权限下也可使用绝对路径"
+        common_path = {"type": "string", "description": path_description}
         return [
             LocalTool(
                 "list_files",
@@ -250,6 +265,21 @@ class ToolRegistry:
             ),
         ]
 
+    def _inside_workspace(self, user_path: str) -> bool:
+        if self.workspace is None or self.guard is None:
+            return False
+        try:
+            self.guard.resolve(user_path).relative_to(self.workspace)
+        except ValueError:
+            return False
+        return True
+
+    def _display_path(self, path: Path) -> str:
+        try:
+            return path.relative_to(self.workspace).as_posix()
+        except ValueError:
+            return str(path)
+
     def _truncate(self, text: str) -> str:
         if len(text) <= self.max_output:
             return text
@@ -270,7 +300,7 @@ class ToolRegistry:
             if pattern not in {"*", "**/*"} and not fnmatch.fnmatch(relative_to_base, pattern):
                 continue
             kind = "/" if item.is_dir() else ""
-            results.append(f"{item.relative_to(self.workspace).as_posix()}{kind}")
+            results.append(f"{self._display_path(item)}{kind}")
             if len(results) >= limit:
                 break
         suffix = "\n... [结果达到上限]" if len(results) >= limit else ""
@@ -314,7 +344,7 @@ class ToolRegistry:
             try:
                 for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
                     if query in line:
-                        matches.append(f"{path.relative_to(self.workspace).as_posix()}:{number}:{line}")
+                        matches.append(f"{self._display_path(path)}:{number}:{line}")
                         if len(matches) >= limit:
                             return ToolResult(True, self._truncate("\n".join(matches) + "\n... [结果达到上限]"))
             except (UnicodeDecodeError, OSError):
@@ -330,7 +360,7 @@ class ToolRegistry:
             return ToolResult(False, error="目标路径不是文件")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
-        return ToolResult(True, f"已写入 {path.relative_to(self.workspace).as_posix()}（{len(content)} 个字符）")
+        return ToolResult(True, f"已写入 {self._display_path(path)}（{len(content)} 个字符）")
 
     def _replace_text(self, args: dict[str, Any]) -> ToolResult:
         path = self.guard.resolve(args["path"], must_exist=True)
@@ -349,7 +379,7 @@ class ToolRegistry:
         updated = text.replace(old, args["new_text"], -1 if replace_all else 1)
         path.write_text(updated, encoding="utf-8")
         replacements = count if replace_all else 1
-        return ToolResult(True, f"已在 {path.relative_to(self.workspace).as_posix()} 中替换 {replacements} 处")
+        return ToolResult(True, f"已在 {self._display_path(path)} 中替换 {replacements} 处")
 
     def _run_command(self, args: dict[str, Any]) -> ToolResult:
         command = args["command"]
@@ -357,7 +387,9 @@ class ToolRegistry:
         decision = self.policy.classify(command)
         if decision.level == RiskLevel.DENY:
             return ToolResult(False, error=f"安全策略拒绝命令: {decision.reason}")
-        needs_approval = self.approval_mode == "always" or decision.level == RiskLevel.REVIEW
+        needs_approval = self.approval_mode != "full" and decision.level == RiskLevel.REVIEW
+        if self.approval_mode == "request" and not self.policy.is_read_only(command):
+            needs_approval = True
         if needs_approval and not self.approver(command, decision.level, decision.reason):
             return ToolResult(False, error=f"用户未批准命令: {decision.reason}")
 

@@ -57,6 +57,13 @@
         <textarea id="message-input" rows="3" maxlength="100000" placeholder="交给小码一个编程任务…"></textarea>
         <div class="composer-actions">
           <button id="composer-workspace" class="quiet-button" type="button">＋ 工作目录</button>
+          <label class="sr-only" for="permission-mode">当前对话权限模式</label>
+          <select id="permission-mode" class="permission-mode" aria-describedby="permission-mode-hint">
+            <option value="request">请求批准</option>
+            <option value="risk">帮我批准</option>
+            <option value="full">完全访问权限</option>
+          </select>
+          <span id="permission-mode-hint" class="sr-only">权限设置仅作用于当前对话，新对话继承最近一次选择</span>
           <span class="shortcut">Enter 发送 · Shift+Enter 换行</span>
           <button id="stop-task" class="stop-button" type="button" hidden>停止</button>
           <button id="send-message" class="send-button" type="submit">发送 <span aria-hidden="true">↑</span></button>
@@ -77,9 +84,12 @@
   <dialog id="workspace-dialog">
     <form id="workspace-form" class="dialog-card">
       <header><div><small id="workspace-dialog-kicker">本机目录</small><h2 id="workspace-dialog-title">添加项目</h2></div><button class="icon-button dialog-close" type="button" aria-label="关闭">×</button></header>
-      <p>输入这台电脑上已经存在的绝对目录。目录内容不会上传到本服务。</p>
+      <p>从这台电脑选择一个已有目录，或在下方输入绝对路径。目录内容不会上传到本服务。</p>
       <label for="workspace-path">工作目录</label>
-      <input id="workspace-path" name="path" autocomplete="off" placeholder="C:\Users\name\project" required>
+      <div class="workspace-picker-row">
+        <input id="workspace-path" name="path" autocomplete="off" placeholder="C:\Users\name\project" required>
+        <button id="browse-workspace" class="quiet-button" type="button">浏览本机…</button>
+      </div>
       <div class="dialog-actions"><button class="quiet-button dialog-close" type="button">取消</button><button class="primary-button" type="submit">使用此目录</button></div>
     </form>
   </dialog>
@@ -94,7 +104,7 @@
         <label for="setting-base-url">Base URL</label><input id="setting-base-url" name="base_url" required>
         <label for="setting-context">上下文预算</label><input id="setting-context" name="context_tokens" type="number" min="1" required>
         <label for="setting-steps">最大步骤</label><input id="setting-steps" name="max_steps" type="number" min="1" required>
-        <label for="setting-approval">命令审批</label><select id="setting-approval" name="approval_mode"><option value="ask">按风险询问</option><option value="always">每次询问</option></select>
+        <label for="setting-approval">新对话默认权限</label><select id="setting-approval" name="approval_mode"><option value="request">请求批准</option><option value="risk">帮我批准</option><option value="full">完全访问权限</option></select>
       </div>
       <label class="check-row"><input id="setting-remember" name="remember_key" type="checkbox"><span>将新 API Key 保存到 Git 忽略的本地配置</span></label>
       <div class="dialog-actions"><button class="quiet-button dialog-close" type="button">取消</button><button class="primary-button" type="submit">保存设置</button></div>
@@ -119,7 +129,7 @@
 
   <dialog id="approval-dialog">
     <form id="approval-form" class="dialog-card approval-card">
-      <header><div><small>命令审批</small><h2>允许执行这条命令吗？</h2></div></header>
+      <header><div><small>操作审批</small><h2>允许执行这项操作吗？</h2></div></header>
       <p id="approval-reason"></p><pre id="approval-command"></pre>
       <div class="dialog-actions"><button id="deny-command" class="quiet-button" type="button">拒绝</button><button id="approve-command" class="danger-button" type="button">允许执行</button></div>
     </form>

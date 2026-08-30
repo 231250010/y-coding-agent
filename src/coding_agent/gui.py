@@ -249,7 +249,7 @@ class ConfigDialog(tk.Toplevel):
         approval = ttk.Combobox(
             body,
             textvariable=self.variables["approval_mode"],
-            values=("ask", "always"),
+            values=("request", "risk", "full"),
             state="readonly",
             width=41,
         )

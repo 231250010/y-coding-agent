@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .permissions import normalize_permission_mode
+
 
 def _integer(value: Any, default: int) -> int:
     try:
@@ -23,7 +25,7 @@ class LocalSettings:
     workspace: str = ""
     context_tokens: int = 32_000
     max_steps: int = 20
-    approval_mode: str = "ask"
+    approval_mode: str = "risk"
     remember_key: bool = False
 
     @property
@@ -48,7 +50,7 @@ class LocalSettings:
             workspace=str(data.get("workspace") or root),
             context_tokens=_integer(os.getenv("CODING_AGENT_CONTEXT_TOKENS") or data.get("context_tokens"), 32_000),
             max_steps=_integer(data.get("max_steps"), 20),
-            approval_mode=str(data.get("approval_mode", "ask")),
+            approval_mode=normalize_permission_mode(data.get("approval_mode", "risk")),
             remember_key=bool(data.get("api_key")),
         )
 
@@ -61,7 +63,7 @@ class LocalSettings:
             "workspace": self.workspace,
             "context_tokens": self.context_tokens,
             "max_steps": self.max_steps,
-            "approval_mode": self.approval_mode,
+            "approval_mode": normalize_permission_mode(self.approval_mode),
         }
         if self.remember_key:
             payload["api_key"] = self.api_key

@@ -30,9 +30,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-steps", type=int, default=20, help="每个任务的最大模型调用步数")
     parser.add_argument(
         "--approval-mode",
-        choices=("ask", "always"),
-        default="ask",
-        help="ask 仅审批风险命令；always 审批所有命令",
+        choices=("request", "risk", "full", "ask", "always"),
+        default="risk",
+        help="request 修改文件或使用网络时询问；risk 仅风险操作询问；full 完全访问（兼容旧 ask/always）",
     )
     return parser
 
@@ -158,4 +158,3 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-

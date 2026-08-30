@@ -11,6 +11,7 @@ from typing import Any, Sequence
 from urllib.parse import unquote, urlsplit
 
 from .local_settings import LocalSettings
+from .directory_picker import DirectoryPickerError, pick_directory
 from .web_runtime import RuntimeConflict, RuntimeNotFound, WebRuntime
 
 
@@ -26,8 +27,14 @@ class LocalWebServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address: tuple[str, int], runtime: WebRuntime) -> None:
+    def __init__(
+        self,
+        address: tuple[str, int],
+        runtime: WebRuntime,
+        directory_picker: Any,
+    ) -> None:
         self.runtime = runtime
+        self.directory_picker = directory_picker
         super().__init__(address, LocalRequestHandler)
 
 
@@ -74,6 +81,8 @@ class LocalRequestHandler(BaseHTTPRequestHandler):
             self._json(409, {"error": str(exc)})
         except ValueError as exc:
             self._json(400, {"error": str(exc)})
+        except DirectoryPickerError as exc:
+            self._json(503, {"error": str(exc)})
         except Exception:
             self._json(500, {"error": "本机服务处理请求失败"})
 
@@ -85,6 +94,12 @@ class LocalRequestHandler(BaseHTTPRequestHandler):
             return 200, runtime.snapshot()
         if method == "POST" and path == "/api/projects":
             return 201, {"project": runtime.add_project(self._string(payload, "path"))}
+        if method == "POST" and path == "/api/projects/pick":
+            selected = self.server.directory_picker(self._optional_string(payload, "initial"))
+            if selected is None:
+                return 200, {"cancelled": True}
+            project, task = runtime.add_project_with_conversation(selected)
+            return 201, {"cancelled": False, "project": project, "task": task}
         if method == "POST" and path == "/api/conversations":
             project_id = payload.get("project_id")
             if project_id is not None and not isinstance(project_id, str):
@@ -115,6 +130,19 @@ class LocalRequestHandler(BaseHTTPRequestHandler):
                 raise RuntimeNotFound("接口不存在")
             if method == "POST" and action == "workspace":
                 return 200, {"task": runtime.bind_workspace(task_id, self._string(payload, "path"))}
+            if method == "POST" and action == "permission":
+                return 200, {
+                    "task": runtime.set_permission_mode(task_id, self._string(payload, "mode"))
+                }
+            if method == "POST" and action == "pick-workspace":
+                runtime.ensure_workspace_change_allowed(task_id)
+                selected = self.server.directory_picker(self._optional_string(payload, "initial"))
+                if selected is None:
+                    return 200, {"cancelled": True}
+                return 200, {
+                    "cancelled": False,
+                    "task": runtime.bind_workspace(task_id, selected),
+                }
             if method == "POST" and action == "select":
                 runtime.select_conversation(task_id)
                 return 204, {}
@@ -223,13 +251,26 @@ class LocalRequestHandler(BaseHTTPRequestHandler):
             raise ValueError(f"{key} 必须是字符串")
         return value
 
+    @staticmethod
+    def _optional_string(payload: dict[str, Any], key: str) -> str | None:
+        value = payload.get(key)
+        if value is not None and not isinstance(value, str):
+            raise ValueError(f"{key} 必须是字符串或 null")
+        return value or None
 
-def create_server(runtime: WebRuntime, *, host: str = "127.0.0.1", port: int = 8000) -> LocalWebServer:
+
+def create_server(
+    runtime: WebRuntime,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    directory_picker: Any = None,
+) -> LocalWebServer:
     if host != "127.0.0.1":
         raise ValueError("本机网页版只能绑定 127.0.0.1")
     if port < 0 or port > 65535:
         raise ValueError("端口必须在 0 到 65535 之间")
-    return LocalWebServer((host, port), runtime)
+    return LocalWebServer((host, port), runtime, directory_picker or pick_directory)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -265,4 +306,3 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

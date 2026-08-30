@@ -46,6 +46,8 @@ def test_page_has_navigation_conversation_diff_and_native_dialog_landmarks() -> 
         "approval-dialog",
         "settings-dialog",
         "delete-dialog",
+        "browse-workspace",
+        "permission-mode",
     }.issubset(parser.ids)
     assert parser.styles == 0
     assert parser.scripts == [{"src": "/assets/app.js", "defer": None}]
@@ -56,7 +58,7 @@ def test_every_form_control_has_an_accessible_label() -> None:
     parser.feed(asset("index.html"))
 
     labelled_controls = {str(label["for"]) for label in parser.labels if label.get("for")}
-    assert {"message-input", "workspace-path", "setting-model", "setting-base-url", "setting-api-key"}.issubset(
+    assert {"message-input", "workspace-path", "setting-model", "setting-base-url", "setting-api-key", "permission-mode"}.issubset(
         labelled_controls
     )
 

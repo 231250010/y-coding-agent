@@ -7,10 +7,15 @@ from coding_agent.web import build_parser as build_web_parser
 
 
 def test_cli_parser() -> None:
-    args = build_parser().parse_args(["--model", "m", "--approval-mode", "always", "fix", "tests"])
+    args = build_parser().parse_args(["--model", "m", "--approval-mode", "full", "fix", "tests"])
     assert args.model == "m"
-    assert args.approval_mode == "always"
+    assert args.approval_mode == "full"
     assert args.task == ["fix", "tests"]
+
+
+@pytest.mark.parametrize("legacy", ["ask", "always"])
+def test_cli_parser_accepts_legacy_approval_modes(legacy: str) -> None:
+    assert build_parser().parse_args(["--approval-mode", legacy]).approval_mode == legacy
 
 
 def test_web_parser() -> None:

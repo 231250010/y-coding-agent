@@ -7,11 +7,14 @@ const ui = {
   transcript: document.querySelector("#transcript"), empty: document.querySelector("#empty-state"),
   composer: document.querySelector("#composer-form"), input: document.querySelector("#message-input"),
   send: document.querySelector("#send-message"), stop: document.querySelector("#stop-task"),
+  composerWorkspace: document.querySelector("#composer-workspace"),
+  permissionMode: document.querySelector("#permission-mode"),
   connection: document.querySelector("#connection-label"), diffPanel: document.querySelector("#diff-panel"),
   diffPath: document.querySelector("#diff-path"), diffCounts: document.querySelector("#diff-counts"),
   diffWarning: document.querySelector("#diff-warning"), diffContent: document.querySelector("#diff-content"),
   workspaceDialog: document.querySelector("#workspace-dialog"), workspaceForm: document.querySelector("#workspace-form"),
   workspacePath: document.querySelector("#workspace-path"), workspaceTitle: document.querySelector("#workspace-dialog-title"),
+  browseWorkspace: document.querySelector("#browse-workspace"),
   workspaceKicker: document.querySelector("#workspace-dialog-kicker"), settingsDialog: document.querySelector("#settings-dialog"),
   settingsForm: document.querySelector("#settings-form"), renameDialog: document.querySelector("#rename-dialog"),
   renameForm: document.querySelector("#rename-form"), renameValue: document.querySelector("#rename-value"),
@@ -127,6 +130,9 @@ function renderConversation() {
     ui.title.textContent = "新对话"; ui.status.textContent = "就绪";
     ui.workspace.textContent = "尚未选择工作目录"; ui.empty.hidden = false;
     ui.transcript.replaceChildren(); ui.send.disabled = false; ui.stop.hidden = true;
+    ui.workspace.disabled = false; ui.composerWorkspace.disabled = false;
+    ui.permissionMode.value = state.settings.approval_mode || "risk";
+    ui.permissionMode.disabled = true;
     return;
   }
   ui.title.textContent = task.title;
@@ -135,6 +141,10 @@ function renderConversation() {
   ui.workspace.textContent = task.workspace || "尚未选择工作目录";
   ui.workspace.title = task.workspace || "为这段对话选择工作目录";
   ui.send.disabled = task.running;
+  ui.workspace.disabled = task.running;
+  ui.composerWorkspace.disabled = task.running;
+  ui.permissionMode.value = task.permission_mode || state.settings.approval_mode || "risk";
+  ui.permissionMode.disabled = task.running;
   ui.stop.hidden = !task.running;
   ui.empty.hidden = task.entries.length > 0;
   const last = task.entries.length ? task.entries[task.entries.length - 1].text : "";
@@ -195,9 +205,26 @@ async function newConversation() {
   } catch (error) { toast(error.message); }
 }
 
+async function changePermissionMode() {
+  const task = currentTask();
+  if (!task) return;
+  const labels = { request: "请求批准", risk: "帮我批准", full: "完全访问权限" };
+  try {
+    await api(`/api/conversations/${task.id}/permission`, {
+      method: "POST", body: { mode: ui.permissionMode.value },
+    });
+    toast(`当前对话已切换为“${labels[ui.permissionMode.value]}”`);
+    await refresh(false);
+  } catch (error) {
+    await refresh(true);
+    toast(error.message);
+  }
+}
+
 function openWorkspace(mode) {
   workspaceMode = mode;
   const task = currentTask();
+  if (mode === "task" && task && task.running) { toast("任务运行时不能更改工作目录"); return; }
   ui.workspaceKicker.textContent = mode === "project" ? "本机项目" : "当前对话";
   ui.workspaceTitle.textContent = mode === "project" ? "添加项目" : "选择工作目录";
   ui.workspacePath.value = mode === "task" && task && task.workspace ? task.workspace : "";
@@ -220,6 +247,30 @@ async function submitWorkspace(event) {
     }
     ui.workspaceDialog.close(); await refresh(false);
   } catch (error) { toast(error.message); }
+}
+
+async function browseWorkspace() {
+  const task = currentTask();
+  if (workspaceMode === "task" && !task) { toast("请先新建对话"); return; }
+  const initial = ui.workspacePath.value.trim() || (task && task.workspace) || null;
+  const path = workspaceMode === "project"
+    ? "/api/projects/pick"
+    : `/api/conversations/${task.id}/pick-workspace`;
+  const previous = ui.browseWorkspace.textContent;
+  ui.browseWorkspace.disabled = true;
+  ui.browseWorkspace.textContent = "正在选择…";
+  try {
+    const data = await api(path, { method: "POST", body: { initial } });
+    if (data.cancelled) return;
+    if (data.task) state.current_id = data.task.id;
+    ui.workspaceDialog.close();
+    closeDiff();
+    await refresh(false);
+  } catch (error) { toast(error.message); }
+  finally {
+    ui.browseWorkspace.disabled = false;
+    ui.browseWorkspace.textContent = previous;
+  }
 }
 
 async function sendMessage(event) {
@@ -343,7 +394,7 @@ function openSettings() {
   document.querySelector("#setting-base-url").value = settings.base_url || "";
   document.querySelector("#setting-context").value = settings.context_tokens || 32000;
   document.querySelector("#setting-steps").value = settings.max_steps || 20;
-  document.querySelector("#setting-approval").value = settings.approval_mode || "ask";
+  document.querySelector("#setting-approval").value = settings.approval_mode || "risk";
   document.querySelector("#setting-remember").checked = Boolean(settings.remember_key);
   ui.settingsDialog.showModal();
 }
@@ -354,7 +405,7 @@ async function saveSettings(event) {
   const body = {
     api_key: String(form.get("api_key") || ""), model: String(form.get("model") || ""),
     base_url: String(form.get("base_url") || ""), context_tokens: Number(form.get("context_tokens")),
-    max_steps: Number(form.get("max_steps")), approval_mode: String(form.get("approval_mode") || "ask"),
+    max_steps: Number(form.get("max_steps")), approval_mode: String(form.get("approval_mode") || "risk"),
     remember_key: form.get("remember_key") === "on",
   };
   try {
@@ -388,10 +439,12 @@ document.querySelector("#stop-task").addEventListener("click", stopTask);
 document.querySelector("#approve-command").addEventListener("click", () => resolveApproval(true));
 document.querySelector("#deny-command").addEventListener("click", () => resolveApproval(false));
 ui.workspaceForm.addEventListener("submit", submitWorkspace);
+ui.browseWorkspace.addEventListener("click", browseWorkspace);
 ui.composer.addEventListener("submit", sendMessage);
 ui.renameForm.addEventListener("submit", submitRename);
 ui.deleteForm.addEventListener("submit", submitDelete);
 ui.settingsForm.addEventListener("submit", saveSettings);
+ui.permissionMode.addEventListener("change", changePermissionMode);
 ui.input.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); ui.composer.requestSubmit(); }
 });

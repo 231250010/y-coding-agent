@@ -23,6 +23,23 @@ def test_projectless_registry_exposes_no_tools() -> None:
     assert result.error == "当前对话尚未选择工作目录"
 
 
+def test_run_command_uses_selected_workspace_not_agent_root(tmp_path: Path) -> None:
+    agent_root = tmp_path / "agent-root"
+    workspace = tmp_path / "selected-workspace"
+    agent_root.mkdir()
+    workspace.mkdir()
+    tools = ToolRegistry(workspace, approver=lambda *_args: True)
+
+    result = tools.execute(
+        "run_command",
+        {"command": 'python -c "from pathlib import Path; Path(\'cwd.txt\').write_text(\'ok\')"'},
+    )
+
+    assert result.ok is True
+    assert (workspace / "cwd.txt").read_text(encoding="utf-8") == "ok"
+    assert not (agent_root / "cwd.txt").exists()
+
+
 def test_write_read_list_and_replace(tmp_path: Path) -> None:
     tools = registry(tmp_path)
     written = tools.execute("write_file", {"path": "src/你好.txt", "content": "第一行\n旧内容"})
@@ -139,6 +156,106 @@ def test_command_approval_and_denial(tmp_path: Path) -> None:
     assert not rejected.ok and "未批准" in (rejected.error or "")
     denied = registry(tmp_path).execute("run_command", {"command": "git reset --hard HEAD"})
     assert not denied.ok and "安全策略拒绝" in (denied.error or "")
+
+
+def test_request_mode_asks_before_file_write(tmp_path: Path) -> None:
+    approvals: list[tuple[str, RiskLevel, str]] = []
+    tools = ToolRegistry(
+        tmp_path,
+        approval_mode="request",
+        approver=lambda command, risk, reason: approvals.append((command, risk, reason)) or False,
+    )
+
+    result = tools.execute("write_file", {"path": "asked.txt", "content": "blocked"})
+
+    assert result.ok is False
+    assert "未批准" in (result.error or "")
+    assert not (tmp_path / "asked.txt").exists()
+    assert approvals[0][0] == "write_file asked.txt"
+
+
+def test_request_mode_asks_for_test_commands_but_allows_known_read_only_commands(tmp_path: Path) -> None:
+    approvals: list[str] = []
+    tools = ToolRegistry(
+        tmp_path,
+        approval_mode="request",
+        approver=lambda command, _risk, _reason: approvals.append(command) or False,
+    )
+
+    read_only = tools.execute("run_command", {"command": "pwd"})
+    test_command = tools.execute("run_command", {"command": "python -m pytest"})
+
+    assert read_only.ok
+    assert not test_command.ok
+    assert approvals == ["python -m pytest"]
+
+
+def test_risk_mode_allows_normal_file_write_without_approval(tmp_path: Path) -> None:
+    tools = ToolRegistry(
+        tmp_path,
+        approval_mode="risk",
+        approver=lambda *_args: False,
+    )
+
+    result = tools.execute("write_file", {"path": "normal.txt", "content": "ok"})
+
+    assert result.ok is True
+    assert (tmp_path / "normal.txt").read_text(encoding="utf-8") == "ok"
+
+
+def test_risk_mode_asks_before_safe_prefix_pipeline(tmp_path: Path) -> None:
+    approvals: list[str] = []
+    tools = ToolRegistry(
+        tmp_path,
+        approval_mode="risk",
+        approver=lambda command, _risk, _reason: approvals.append(command) or False,
+    )
+
+    result = tools.execute(
+        "run_command",
+        {"command": 'Get-Content README.md | python -c "print(1)"'},
+    )
+
+    assert result.ok is False
+    assert approvals == ['Get-Content README.md | python -c "print(1)"']
+
+
+def test_full_mode_runs_review_command_without_approval_and_keeps_hard_denials(tmp_path: Path) -> None:
+    tools = ToolRegistry(tmp_path, approval_mode="full", approver=lambda *_args: False)
+
+    allowed = tools.execute("run_command", {"command": "python --version"})
+    denied = tools.execute("run_command", {"command": "git reset --hard HEAD"})
+
+    assert allowed.ok is True
+    assert denied.ok is False
+    assert "安全策略拒绝" in (denied.error or "")
+
+
+def test_full_mode_can_read_and_write_absolute_path_outside_workspace(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside.txt"
+    workspace.mkdir()
+    outside.write_text("outside", encoding="utf-8")
+    tools = ToolRegistry(workspace, approval_mode="full")
+
+    read = tools.execute("read_file", {"path": str(outside)})
+    written = tools.execute("write_file", {"path": str(outside), "content": "changed"})
+
+    assert read.ok is True and "outside" in read.output
+    assert written.ok is True
+    assert outside.read_text(encoding="utf-8") == "changed"
+
+
+def test_full_mode_still_rejects_relative_path_traversal(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    tools = ToolRegistry(workspace, approval_mode="full")
+
+    result = tools.execute("write_file", {"path": "../outside.txt", "content": "blocked"})
+
+    assert result.ok is False
+    assert "路径超出工作区" in (result.error or "")
+    assert not (tmp_path / "outside.txt").exists()
 
 
 def test_command_timeout(tmp_path: Path) -> None:

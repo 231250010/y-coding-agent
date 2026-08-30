@@ -71,3 +71,16 @@ def test_adapter_rejects_empty_choices() -> None:
     with pytest.raises(ModelError, match="空 choices"):
         model.complete([{"role": "user", "content": "hello"}])
 
+
+def test_transport_can_initialize_with_socks_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ALL_PROXY", "socks5://127.0.0.1:9")
+
+    model = OpenAIChatModel(
+        api_key="test-key",
+        model="test-model",
+        base_url="https://example.invalid",
+    )
+
+    assert model.model == "test-model"

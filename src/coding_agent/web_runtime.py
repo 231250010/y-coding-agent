@@ -12,6 +12,7 @@ from .config import Config
 from .context import ContextManager
 from .local_settings import LocalSettings
 from .model import ChatModel, ModelError, OpenAIChatModel
+from .permissions import PERMISSION_MODES, normalize_permission_mode
 from .prompts import PROJECTLESS_SYSTEM_PROMPT, SYSTEM_PROMPT
 from .safety import RiskLevel
 from .session_store import SessionStore
@@ -55,6 +56,7 @@ class PendingApproval:
 class WebTask:
     id: str
     project_id: str | None
+    permission_mode: str = "risk"
     title: str = "新对话"
     title_is_custom: bool = False
     entries: list[ChatEntry] = field(default_factory=list)
@@ -112,23 +114,48 @@ class WebRuntime:
             }
 
     def add_project(self, raw_path: str) -> dict[str, Any]:
-        text = raw_path.strip()
-        if not text:
-            raise ValueError("工作目录不能为空")
-        requested = Path(text).expanduser()
-        if not requested.is_absolute():
-            raise ValueError("请输入绝对工作目录")
-        path = requested.resolve()
-        if not path.is_dir():
-            raise ValueError(f"工作目录不存在或不是目录: {path}")
+        path = self._workspace_path(raw_path)
         with self.lock:
             existing = next((project for project in self.projects if project.path == path), None)
             if existing is not None:
                 return self._project_payload(existing)
             project = WebProject(uuid.uuid4().hex, path.name or str(path), path)
             self.projects.append(project)
-            self._save()
+            try:
+                self._save()
+            except Exception:
+                self.projects.remove(project)
+                raise
             return self._project_payload(project)
+
+    def add_project_with_conversation(
+        self, raw_path: str
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        path = self._workspace_path(raw_path)
+        with self.lock:
+            project = next((item for item in self.projects if item.path == path), None)
+            created_project = project is None
+            if project is None:
+                project = WebProject(uuid.uuid4().hex, path.name or str(path), path)
+                self.projects.append(project)
+            task = WebTask(
+                id=uuid.uuid4().hex,
+                project_id=project.id,
+                permission_mode=normalize_permission_mode(self.settings.approval_mode),
+                change_tracker=ConversationChangeTracker(project.path),
+            )
+            previous_current = self.current_id
+            self.tasks.append(task)
+            self.current_id = task.id
+            try:
+                self._save()
+            except Exception:
+                self.tasks.remove(task)
+                self.current_id = previous_current
+                if created_project:
+                    self.projects.remove(project)
+                raise
+            return self._project_payload(project), self._task_payload(task)
 
     def new_conversation(self, project_id: str | None = None) -> dict[str, Any]:
         with self.lock:
@@ -136,6 +163,7 @@ class WebRuntime:
             task = WebTask(
                 id=uuid.uuid4().hex,
                 project_id=project.id if project else None,
+                permission_mode=normalize_permission_mode(self.settings.approval_mode),
                 change_tracker=ConversationChangeTracker(project.path if project else None),
             )
             self.tasks.append(task)
@@ -183,25 +211,69 @@ class WebRuntime:
             self._save()
 
     def bind_workspace(self, task_id: str, raw_path: str) -> dict[str, Any]:
+        path = self._workspace_path(raw_path)
         with self.lock:
             task = self._task(task_id)
             if task.running:
                 raise RuntimeConflict("对话正在运行，不能更改工作目录")
-        project_payload = self.add_project(raw_path)
-        with self.lock:
-            task = self._task(task_id)
-            project = self._project(project_payload["id"])
+            project = next((item for item in self.projects if item.path == path), None)
+            created_project = project is None
+            if project is None:
+                project = WebProject(uuid.uuid4().hex, path.name or str(path), path)
+                self.projects.append(project)
+            previous_project_id = task.project_id
+            previous_workspace = task.change_tracker.workspace
+            previous_current = self.current_id
             task.project_id = project.id
             task.change_tracker.retarget(project.path)
             self.current_id = task.id
-            self._save()
+            try:
+                self._save()
+            except Exception:
+                task.project_id = previous_project_id
+                task.change_tracker.retarget(previous_workspace)
+                self.current_id = previous_current
+                if created_project:
+                    self.projects.remove(project)
+                raise
             return self._task_payload(task)
+
+    def ensure_workspace_change_allowed(self, task_id: str) -> None:
+        with self.lock:
+            task = self._task(task_id)
+            if task.running:
+                raise RuntimeConflict("对话正在运行，不能更改工作目录")
 
     def select_conversation(self, task_id: str) -> None:
         with self.lock:
             self._task(task_id)
             self.current_id = task_id
             self._save()
+
+    def set_permission_mode(self, task_id: str, mode: str) -> dict[str, Any]:
+        normalized = normalize_permission_mode(mode, default="")
+        if normalized not in PERMISSION_MODES:
+            raise ValueError("权限模式只能是 request、risk 或 full")
+        with self.lock:
+            task = self._task(task_id)
+            if task.running:
+                raise RuntimeConflict("对话正在运行，不能更改权限模式")
+            previous_task_mode = task.permission_mode
+            previous_default = self.settings.approval_mode
+            task.permission_mode = normalized
+            self.settings.approval_mode = normalized
+            try:
+                self.settings.save(self.settings_root)
+                self._save()
+            except Exception:
+                task.permission_mode = previous_task_mode
+                self.settings.approval_mode = previous_default
+                try:
+                    self.settings.save(self.settings_root)
+                except Exception:
+                    pass
+                raise
+            return self._task_payload(task)
 
     def send_message(self, task_id: str, text: str) -> dict[str, Any]:
         message = text.strip()
@@ -321,9 +393,9 @@ class WebRuntime:
             if "max_steps" in values:
                 self.settings.max_steps = self._positive_int(values["max_steps"], "最大步骤")
             if "approval_mode" in values:
-                mode = str(values["approval_mode"])
-                if mode not in {"ask", "always"}:
-                    raise ValueError("审批模式只能是 ask 或 always")
+                mode = normalize_permission_mode(values["approval_mode"], default="")
+                if mode not in PERMISSION_MODES:
+                    raise ValueError("权限模式只能是 request、risk 或 full")
                 self.settings.approval_mode = mode
             if "remember_key" in values:
                 self.settings.remember_key = bool(values["remember_key"])
@@ -344,7 +416,10 @@ class WebRuntime:
             with self.lock:
                 task = self._task(task_id)
                 task.history = list(agent.history)
-                task.entries.append(ChatEntry("assistant", result, tuple(task.pending_change_paths)))
+                visible_paths = tuple(
+                    path for path in task.pending_change_paths if path in task.change_tracker.changes
+                )
+                task.entries.append(ChatEntry("assistant", result, visible_paths))
                 task.pending_change_paths.clear()
                 task.running = False
                 task.status = "已完成"
@@ -370,7 +445,10 @@ class WebRuntime:
                 return
             if agent is not None:
                 task.history = list(agent.history)
-            task.entries.append(ChatEntry(kind, text, tuple(task.pending_change_paths)))
+            visible_paths = tuple(
+                path for path in task.pending_change_paths if path in task.change_tracker.changes
+            )
+            task.entries.append(ChatEntry(kind, text, visible_paths))
             task.pending_change_paths.clear()
             task.running = False
             task.status = "已停止" if kind == "system" else "发生错误"
@@ -379,6 +457,9 @@ class WebRuntime:
     def _make_agent(self, task: WebTask) -> CodingAgent:
         project = self._project(task.project_id) if task.project_id else None
         workspace = project.path if project else None
+        # Config validates model settings and requires a directory. The settings
+        # root is used only for that validation in projectless chat; ToolRegistry
+        # still receives None, so file and command tools cannot fall back here.
         config = Config.from_values(
             api_key=self.settings.api_key,
             model=self.settings.model,
@@ -386,7 +467,7 @@ class WebRuntime:
             workspace=workspace or self.settings_root,
             context_tokens=self.settings.context_tokens,
             max_steps=self.settings.max_steps,
-            approval_mode=self.settings.approval_mode,
+            approval_mode=task.permission_mode,
         )
         model = self.model_factory() if self.model_factory else OpenAIChatModel(
             api_key=config.api_key,
@@ -401,7 +482,7 @@ class WebRuntime:
                 task.id, command, risk, reason
             ),
             is_cancelled=task.cancel_event.is_set,
-            approval_mode=config.approval_mode,
+            approval_mode=task.permission_mode,
             change_tracker=task.change_tracker,
         )
         return CodingAgent(
@@ -435,8 +516,13 @@ class WebRuntime:
                 changes = data.get("changes")
                 if isinstance(changes, dict):
                     for path in changes.get("paths", []):
-                        if isinstance(path, str) and path not in task.pending_change_paths:
-                            task.pending_change_paths.append(path)
+                        if not isinstance(path, str):
+                            continue
+                        if path in task.change_tracker.changes:
+                            if path not in task.pending_change_paths:
+                                task.pending_change_paths.append(path)
+                        elif path in task.pending_change_paths:
+                            task.pending_change_paths.remove(path)
                 task.status = "工具完成，继续分析" if ok else "工具失败，正在恢复"
             self._save()
 
@@ -451,7 +537,7 @@ class WebRuntime:
         with self.lock:
             self.approvals[approval.id] = approval
             task = self._task(task_id)
-            task.status = "等待命令审批"
+            task.status = "等待操作审批"
         try:
             while not approval.signal.wait(0.1):
                 with self.lock:
@@ -484,6 +570,12 @@ class WebRuntime:
             tracker.load_serialized(raw.get("file_changes", []))
             entries = self._entries_from_storage(raw.get("entries"))
             pending = self._collapse_legacy_changes(entries)
+            remaining_paths = set(tracker.changes)
+            for entry in entries:
+                entry.change_paths = tuple(
+                    path for path in entry.change_paths if path in remaining_paths
+                )
+            pending = [path for path in pending if path in remaining_paths]
             raw_pending = raw.get("pending_change_paths")
             if isinstance(raw_pending, list):
                 for path in raw_pending:
@@ -496,6 +588,9 @@ class WebRuntime:
             task = WebTask(
                 id=str(raw.get("id") or uuid.uuid4().hex),
                 project_id=project.id if project else None,
+                permission_mode=normalize_permission_mode(
+                    raw.get("permission_mode", self.settings.approval_mode)
+                ),
                 title=str(raw.get("title") or "新对话"),
                 title_is_custom=bool(raw.get("title_is_custom", False)),
                 entries=entries,
@@ -518,6 +613,7 @@ class WebRuntime:
                     {
                         "id": task.id,
                         "project_id": task.project_id,
+                        "permission_mode": task.permission_mode,
                         "title": task.title,
                         "title_is_custom": task.title_is_custom,
                         "entries": [
@@ -547,6 +643,19 @@ class WebRuntime:
         return task
 
     @staticmethod
+    def _workspace_path(raw_path: str) -> Path:
+        text = raw_path.strip()
+        if not text:
+            raise ValueError("工作目录不能为空")
+        requested = Path(text).expanduser()
+        if not requested.is_absolute():
+            raise ValueError("请输入绝对工作目录")
+        path = requested.resolve()
+        if not path.is_dir():
+            raise ValueError(f"工作目录不存在或不是目录: {path}")
+        return path
+
+    @staticmethod
     def _project_payload(project: WebProject) -> dict[str, Any]:
         return {"id": project.id, "title": project.title, "path": str(project.path)}
 
@@ -555,6 +664,7 @@ class WebRuntime:
         return {
             "id": task.id,
             "project_id": task.project_id,
+            "permission_mode": task.permission_mode,
             "title": task.title,
             "running": task.running,
             "status": task.status,
