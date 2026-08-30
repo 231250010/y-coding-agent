@@ -239,6 +239,49 @@ def test_net_zero_temporary_file_is_removed_from_pending_changes(tmp_path: Path)
     assert task.pending_change_paths == []
 
 
+def test_answer_diff_is_scoped_to_its_turn_and_survives_restart(tmp_path: Path) -> None:
+    runtime = WebRuntime(settings(tmp_path), tmp_path, model_factory=lambda: ScriptedModel([]))
+    project = runtime.add_project(str(tmp_path))
+    task_payload = runtime.new_conversation(project["id"])
+    task = next(item for item in runtime.tasks if item.id == task_payload["id"])
+    tracker = task.change_tracker
+    path = tmp_path / "page.html"
+
+    tracker.begin_turn()
+    created = tracker.capture_paths(["page.html"])
+    path.write_text("first\n", encoding="utf-8")
+    tracker.finish(created)
+    first = ChatEntry(
+        "assistant",
+        "created",
+        ("page.html",),
+        file_changes=tracker.serialize_turn(),
+    )
+    task.entries.append(first)
+
+    tracker.begin_turn()
+    edited = tracker.capture_paths(["page.html"])
+    path.write_text("second\n", encoding="utf-8")
+    tracker.finish(edited)
+    second = ChatEntry(
+        "assistant",
+        "edited",
+        ("page.html",),
+        file_changes=tracker.serialize_turn(),
+    )
+    task.entries.append(second)
+    runtime._save()
+
+    assert runtime.diff(task.id, "page.html")["status"] == "added"
+    assert runtime.diff(task.id, "page.html", first.id)["status"] == "added"
+    turn_diff = runtime.diff(task.id, "page.html", second.id)
+    assert turn_diff["status"] == "modified"
+    assert (turn_diff["added"], turn_diff["deleted"]) == (1, 1)
+
+    restored = WebRuntime(settings(tmp_path), tmp_path, model_factory=lambda: ScriptedModel([]))
+    assert restored.diff(task.id, "page.html", second.id)["status"] == "modified"
+
+
 def test_devops_progress_is_sanitized_exposed_and_marked_cancelling(tmp_path: Path) -> None:
     runtime = WebRuntime(settings(tmp_path), tmp_path, model_factory=lambda: ScriptedModel([]))
     task_payload = runtime.new_conversation()

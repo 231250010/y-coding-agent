@@ -101,7 +101,7 @@ class CodingAgent:
                         "ok": result.ok,
                         "output": result.output,
                         "error": result.error,
-                        "changes": result.changes.to_event(change_tracker.changes)
+                        "changes": result.changes.to_event(change_tracker.turn_changes)
                         if (change_tracker := getattr(self.tools, "change_tracker", None))
                         else {"paths": [], "warning": None, "files": []},
                     },

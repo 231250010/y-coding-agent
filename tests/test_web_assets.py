@@ -115,6 +115,15 @@ def test_frontend_streams_state_with_sse_and_renders_partial_assistant_text() ->
     assert "stream-cursor" in css
 
 
+def test_change_cards_request_their_own_turn_diff() -> None:
+    javascript = asset("app.js")
+
+    assert "openDiff(path, entry.id)" in javascript
+    assert "encodeURIComponent(entryId)" in javascript
+    assert 'entry.change_scope === "conversation"' in javascript
+    assert "对话累计改动（旧记录）" in javascript
+
+
 def test_devops_progress_rail_and_cancel_control_are_wired() -> None:
     html = asset("index.html")
     javascript = asset("app.js")

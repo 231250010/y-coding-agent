@@ -40,6 +40,29 @@ def test_repeated_edits_stay_relative_to_first_baseline(tmp_path: Path) -> None:
     assert change.segments[0].latest.text == "new\nextra\n"
 
 
+def test_new_turn_uses_current_file_as_baseline_without_losing_cumulative_change(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "app.py"
+    tracker = ConversationChangeTracker(tmp_path)
+
+    tracker.begin_turn()
+    created = tracker.capture_paths(["app.py"])
+    path.write_text("first\n", encoding="utf-8")
+    tracker.finish(created)
+    assert tracker.turn_changes["app.py"].status == "added"
+
+    tracker.begin_turn()
+    edited = tracker.capture_paths(["app.py"])
+    path.write_text("second\n", encoding="utf-8")
+    tracker.finish(edited)
+
+    assert tracker.changes["app.py"].status == "added"
+    assert tracker.turn_changes["app.py"].status == "modified"
+    assert tracker.turn_changes["app.py"].segments[0].baseline.text == "first\n"
+    assert tracker.turn_changes["app.py"].segments[0].latest.text == "second\n"
+
+
 def test_reverting_to_baseline_removes_active_change(tmp_path: Path) -> None:
     path = tmp_path / "a.txt"
     path.write_text("base\n", encoding="utf-8")

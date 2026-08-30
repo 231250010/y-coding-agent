@@ -9,7 +9,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .agent import AgentCancelled, AgentStopped, CodingAgent
-from .changes import ConversationChangeTracker, build_diff_rows
+from .changes import (
+    ConversationChangeTracker,
+    FileChange,
+    build_diff_rows,
+    file_change_from_dict,
+    file_change_to_dict,
+)
 from .config import Config
 from .context import ContextManager
 from .local_settings import LocalSettings
@@ -35,6 +41,8 @@ class ChatEntry:
     kind: str
     text: str
     change_paths: tuple[str, ...] = ()
+    id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    file_changes: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -386,6 +394,7 @@ class WebRuntime:
             task.progress = None
             task.cancel_event.clear()
             task.pending_change_paths.clear()
+            task.change_tracker.begin_turn()
             self.current_id = task.id
             self._save()
             worker = threading.Thread(
@@ -423,10 +432,10 @@ class WebRuntime:
             approval.signal.set()
             self._touch()
 
-    def diff(self, task_id: str, path: str) -> dict[str, Any]:
+    def diff(self, task_id: str, path: str, entry_id: str | None = None) -> dict[str, Any]:
         with self.lock:
             task = self._task(task_id)
-            change = task.change_tracker.changes.get(path)
+            change = self._entry_change(task, entry_id, path)
             if change is None:
                 raise RuntimeNotFound("文件改动不存在")
             rows: list[dict[str, Any]] = []
@@ -477,6 +486,22 @@ class WebRuntime:
                 "warning": change.warning,
                 "rows": rows,
             }
+
+    @staticmethod
+    def _entry_change(task: WebTask, entry_id: str | None, path: str) -> FileChange | None:
+        if entry_id is None:
+            return task.change_tracker.changes.get(path)
+        entry = next((item for item in task.entries if item.id == entry_id), None)
+        if entry is None:
+            return None
+        for raw_change in entry.file_changes:
+            change = file_change_from_dict(raw_change)
+            if change is not None and change.path == path:
+                return change
+        # Sessions saved before per-turn snapshots only have the cumulative diff.
+        if path in entry.change_paths:
+            return task.change_tracker.changes.get(path)
+        return None
 
     def devops_overview(self, task_id: str) -> dict[str, Any]:
         with self.lock:
@@ -642,9 +667,16 @@ class WebRuntime:
                 task = self._task(task_id)
                 task.history = list(agent.history)
                 visible_paths = tuple(
-                    path for path in task.pending_change_paths if path in task.change_tracker.changes
+                    path for path in task.pending_change_paths if path in task.change_tracker.turn_changes
                 )
-                task.entries.append(ChatEntry("assistant", result, visible_paths))
+                task.entries.append(
+                    ChatEntry(
+                        "assistant",
+                        result,
+                        visible_paths,
+                        file_changes=task.change_tracker.serialize_turn(),
+                    )
+                )
                 task.streaming_content = ""
                 task.pending_change_paths.clear()
                 task.running = False
@@ -672,9 +704,16 @@ class WebRuntime:
             if agent is not None:
                 task.history = list(agent.history)
             visible_paths = tuple(
-                path for path in task.pending_change_paths if path in task.change_tracker.changes
+                path for path in task.pending_change_paths if path in task.change_tracker.turn_changes
             )
-            task.entries.append(ChatEntry(kind, text, visible_paths))
+            task.entries.append(
+                ChatEntry(
+                    kind,
+                    text,
+                    visible_paths,
+                    file_changes=task.change_tracker.serialize_turn(),
+                )
+            )
             task.streaming_content = ""
             task.pending_change_paths.clear()
             task.running = False
@@ -801,7 +840,7 @@ class WebRuntime:
                     for path in changes.get("paths", []):
                         if not isinstance(path, str):
                             continue
-                        if path in task.change_tracker.changes:
+                        if path in task.change_tracker.turn_changes:
                             if path not in task.pending_change_paths:
                                 task.pending_change_paths.append(path)
                         elif path in task.pending_change_paths:
@@ -944,7 +983,13 @@ class WebRuntime:
                         "title": task.title,
                         "title_is_custom": task.title_is_custom,
                         "entries": [
-                            {"kind": entry.kind, "text": entry.text, "change_paths": list(entry.change_paths)}
+                            {
+                                "id": entry.id,
+                                "kind": entry.kind,
+                                "text": entry.text,
+                                "change_paths": list(entry.change_paths),
+                                "file_changes": entry.file_changes,
+                            }
                             for entry in task.entries
                         ],
                         "history": task.history,
@@ -1012,7 +1057,13 @@ class WebRuntime:
             "workspace_changing": task.workspace_changing,
             "task_list": task.task_list.snapshot(),
             "entries": [
-                {"kind": entry.kind, "text": entry.text, "change_paths": list(entry.change_paths)}
+                {
+                    "id": entry.id,
+                    "kind": entry.kind,
+                    "text": entry.text,
+                    "change_paths": list(entry.change_paths),
+                    "change_scope": "turn" if entry.file_changes else "conversation",
+                }
                 for entry in task.entries
             ],
             "review_path": task.review_path,
@@ -1118,11 +1169,20 @@ class WebRuntime:
             if not isinstance(raw, dict):
                 continue
             paths = raw.get("change_paths")
+            stored_changes: list[dict[str, Any]] = []
+            raw_changes = raw.get("file_changes")
+            if isinstance(raw_changes, list):
+                for raw_change in raw_changes:
+                    parsed = file_change_from_dict(raw_change)
+                    if parsed is not None:
+                        stored_changes.append(file_change_to_dict(parsed))
             entries.append(
                 ChatEntry(
                     str(raw.get("kind", "system")),
                     str(raw.get("text", "")),
                     tuple(path for path in paths if isinstance(path, str)) if isinstance(paths, list) else (),
+                    id=str(raw.get("id") or uuid.uuid4().hex),
+                    file_changes=stored_changes,
                 )
             )
         return entries

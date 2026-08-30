@@ -157,10 +157,14 @@ class LocalRequestHandler(BaseHTTPRequestHandler):
                 runtime.cancel(task_id)
                 return 202, {"ok": True}
             if method == "GET" and action.startswith("changes/"):
-                change_path = unquote(action[len("changes/") :])
+                change_target = action[len("changes/") :]
+                entry_id: str | None = None
+                if "/" in change_target:
+                    entry_id, change_target = change_target.split("/", 1)
+                change_path = unquote(change_target)
                 if not change_path:
                     raise RuntimeNotFound("文件改动不存在")
-                return 200, {"change": runtime.diff(task_id, change_path)}
+                return 200, {"change": runtime.diff(task_id, change_path, entry_id)}
             if method == "GET" and action == "devops-overview":
                 return 200, {"overview": runtime.devops_overview(task_id)}
 

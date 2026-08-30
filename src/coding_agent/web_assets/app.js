@@ -251,12 +251,13 @@ function messageNode(entry) {
   article.append(body);
   if (entry.change_paths && entry.change_paths.length) {
     const summary = element("div", "change-summary");
-    summary.append(element("p", "change-summary-title", `本轮改动 · ${entry.change_paths.length} 个文件`));
+    const scopeLabel = entry.change_scope === "conversation" ? "对话累计改动（旧记录）" : "本轮改动";
+    summary.append(element("p", "change-summary-title", `${scopeLabel} · ${entry.change_paths.length} 个文件`));
     for (const path of entry.change_paths) {
       const card = element("button", "change-card");
       card.type = "button";
       card.append(element("span", "change-icon", "▤"), element("span", "change-path", path), element("span", "", "打开 →"));
-      card.addEventListener("click", () => openDiff(path));
+      card.addEventListener("click", () => openDiff(path, entry.id));
       summary.append(card);
     }
     article.append(summary);
@@ -533,11 +534,12 @@ async function stopTask() {
   catch (error) { toast(error.message); }
 }
 
-async function openDiff(path) {
+async function openDiff(path, entryId = "") {
   const task = currentTask();
   if (!task) return;
   try {
-    const data = await api(`/api/conversations/${task.id}/changes/${encodeURIComponent(path)}`);
+    const scope = entryId ? `${encodeURIComponent(entryId)}/` : "";
+    const data = await api(`/api/conversations/${task.id}/changes/${scope}${encodeURIComponent(path)}`);
     const change = data.change;
     ui.diffPath.textContent = change.path; ui.diffPath.title = change.path;
     ui.diffCounts.replaceChildren(element("b", "", `+${change.added}`), element("i", "", `−${change.deleted}`));

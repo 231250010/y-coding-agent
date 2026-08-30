@@ -232,6 +232,11 @@ class ConversationChangeTracker:
         self.max_text_bytes = max_text_bytes
         self.max_command_bytes = max_command_bytes
         self.changes: dict[str, FileChange] = {}
+        self.turn_changes: dict[str, FileChange] = {}
+
+    def begin_turn(self) -> None:
+        """Start a new user turn while preserving conversation-wide changes."""
+        self.turn_changes.clear()
 
     def retarget(self, workspace: Path | None) -> None:
         self.workspace = workspace.resolve() if workspace else None
@@ -266,12 +271,20 @@ class ConversationChangeTracker:
             after = after_snapshots.get(path, FileSnapshot(False))
             if self._same(before, after):
                 continue
-            self._merge(path, before, after)
+            self._merge_into(self.changes, path, before, after)
+            self._merge_into(self.turn_changes, path, before, after)
             changed.append(path)
         return ChangeSet(tuple(changed), warning)
 
     def serialize(self) -> list[dict[str, Any]]:
-        return [file_change_to_dict(self.changes[path]) for path in sorted(self.changes)]
+        return self._serialize_changes(self.changes)
+
+    def serialize_turn(self) -> list[dict[str, Any]]:
+        return self._serialize_changes(self.turn_changes)
+
+    @staticmethod
+    def _serialize_changes(changes: dict[str, FileChange]) -> list[dict[str, Any]]:
+        return [file_change_to_dict(changes[path]) for path in sorted(changes)]
 
     def load_serialized(self, items: Any) -> None:
         self.changes.clear()
@@ -379,12 +392,18 @@ class ConversationChangeTracker:
     def _same(left: FileSnapshot, right: FileSnapshot) -> bool:
         return left.exists == right.exists and left.digest == right.digest
 
-    def _merge(self, path: str, before: FileSnapshot, after: FileSnapshot) -> None:
+    def _merge_into(
+        self,
+        changes: dict[str, FileChange],
+        path: str,
+        before: FileSnapshot,
+        after: FileSnapshot,
+    ) -> None:
         workspace = str(self.workspace) if self.workspace else ""
-        existing = self.changes.get(path)
+        existing = changes.get(path)
         if existing is None:
             existing = FileChange(path, [ChangeSegment(workspace, before, after)], "modified", 0, 0)
-            self.changes[path] = existing
+            changes[path] = existing
         else:
             active = existing.segments[-1]
             if active.workspace != workspace or not self._same(active.latest, before):
@@ -397,7 +416,7 @@ class ConversationChangeTracker:
         if self._same(active.baseline, active.latest):
             existing.segments.pop()
             if not existing.segments:
-                self.changes.pop(path, None)
+                changes.pop(path, None)
                 return
             active = existing.segments[-1]
 
