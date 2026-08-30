@@ -26,6 +26,10 @@ def _schema(
 
 
 class GitHubActionsToolProvider:
+    _PARALLEL_SAFE_TOOLS = frozenset(
+        {"github_actions_status", "github_actions_failed_logs"}
+    )
+
     def __init__(
         self,
         service: GitHubActionsService,
@@ -88,6 +92,9 @@ class GitHubActionsToolProvider:
 
     def schemas(self) -> list[dict[str, Any]]:
         return list(self._schemas)
+
+    def can_run_parallel(self, name: str, _arguments: dict[str, Any]) -> bool:
+        return name in self._PARALLEL_SAFE_TOOLS
 
     def execute(self, name: str, arguments: dict[str, Any]) -> ToolResult:
         handler = self._handlers.get(name)

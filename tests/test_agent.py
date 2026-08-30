@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -11,7 +13,7 @@ from coding_agent.agent import AgentStopped, CodingAgent
 from coding_agent.changes import ConversationChangeTracker
 from coding_agent.context import ContextManager
 from coding_agent.model import AssistantResponse, Message, ToolCall
-from coding_agent.tools import ToolRegistry
+from coding_agent.tools import ToolRegistry, ToolResult
 
 
 class ScriptedModel:
@@ -95,6 +97,86 @@ def test_multiple_tools_are_executed_in_order(tmp_path: Path) -> None:
     agent, _ = make_agent(tmp_path, responses)
     assert agent.run("change") == "done"
     assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "new"
+
+
+class ConcurrencyProbeProvider:
+    def __init__(self, parallel_names: set[str]) -> None:
+        self.parallel_names = parallel_names
+        self.lock = threading.Lock()
+        self.active = 0
+        self.max_active = 0
+
+    def schemas(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": "test probe",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+            for name in ("read_probe", "write_probe")
+        ]
+
+    def can_run_parallel(self, name: str, _arguments: dict[str, Any]) -> bool:
+        return name in self.parallel_names
+
+    def execute(self, name: str, _arguments: dict[str, Any]) -> ToolResult:
+        with self.lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        try:
+            time.sleep(0.08)
+            return ToolResult(True, output=name)
+        finally:
+            with self.lock:
+                self.active -= 1
+
+
+def test_independent_read_only_tool_calls_run_in_parallel_and_keep_message_order() -> None:
+    provider = ConcurrencyProbeProvider({"read_probe"})
+    model = ScriptedModel(
+        [
+            AssistantResponse(
+                tool_calls=[
+                    call("c1", "read_probe", {}),
+                    call("c2", "read_probe", {}),
+                    call("c3", "read_probe", {}),
+                ]
+            ),
+            AssistantResponse("done"),
+        ]
+    )
+    agent = CodingAgent(
+        model, provider, ContextManager(100_000), max_parallel_tools=2
+    )
+
+    assert agent.run("inspect") == "done"
+    assert provider.max_active == 2
+    tool_messages = [
+        message for message in model.requests[1][0] if message.get("role") == "tool"
+    ]
+    assert [message["tool_call_id"] for message in tool_messages] == ["c1", "c2", "c3"]
+
+
+def test_mutating_tool_calls_remain_serial() -> None:
+    provider = ConcurrencyProbeProvider({"read_probe"})
+    model = ScriptedModel(
+        [
+            AssistantResponse(
+                tool_calls=[
+                    call("c1", "write_probe", {}),
+                    call("c2", "write_probe", {}),
+                ]
+            ),
+            AssistantResponse("done"),
+        ]
+    )
+    agent = CodingAgent(model, provider, ContextManager(100_000))
+
+    assert agent.run("mutate") == "done"
+    assert provider.max_active == 1
 
 
 def test_invalid_json_is_returned_to_model(tmp_path: Path) -> None:

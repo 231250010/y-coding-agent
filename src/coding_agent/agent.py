@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from .context import ContextManager
-from .model import AssistantResponse, ChatModel, Message, ModelError
+from .model import AssistantResponse, ChatModel, Message, ModelError, ToolCall
 from .providers import ToolProvider
 from .prompts import SUMMARY_PROMPT, SYSTEM_PROMPT
 from .task_list import TaskListState
@@ -35,7 +36,10 @@ class CodingAgent:
         is_cancelled: Callable[[], bool] | None = None,
         system_prompt: str = SYSTEM_PROMPT,
         task_list: TaskListState | None = None,
+        max_parallel_tools: int = 4,
     ) -> None:
+        if max_parallel_tools < 1:
+            raise ValueError("max_parallel_tools 必须至少为 1")
         self.model = model
         self.tools = tools
         self.context = context
@@ -44,6 +48,7 @@ class CodingAgent:
         self.is_cancelled = is_cancelled or (lambda: False)
         self.system_prompt = system_prompt
         self.task_list = task_list or TaskListState()
+        self.max_parallel_tools = max_parallel_tools
         self.history: list[Message] = [{"role": "system", "content": system_prompt}]
 
     def clear(self) -> None:
@@ -85,10 +90,7 @@ class CodingAgent:
                 self.on_event("final", {"content": content, "step": step})
                 return content
 
-            for call in response.tool_calls:
-                self._check_cancelled()
-                self.on_event("tool_start", {"name": call.name, "arguments": call.arguments})
-                result = self._execute_call(call.name, call.arguments)
+            for call, result in self._execute_calls(response.tool_calls):
                 self.history.append(
                     {"role": "tool", "tool_call_id": call.id, "content": result.to_message()}
                 )
@@ -145,6 +147,60 @@ class CodingAgent:
         if not isinstance(arguments, dict):
             return ToolResult(False, error="工具参数必须是 JSON 对象")
         return self.tools.execute(name, arguments)
+
+    def _execute_calls(
+        self, calls: Sequence[ToolCall]
+    ) -> Iterator[tuple[ToolCall, ToolResult]]:
+        ordered = list(calls)
+        index = 0
+        while index < len(ordered):
+            self._check_cancelled()
+            if not self._can_run_parallel(ordered[index]):
+                call = ordered[index]
+                self.on_event(
+                    "tool_start", {"name": call.name, "arguments": call.arguments}
+                )
+                yield call, self._execute_call(call.name, call.arguments)
+                index += 1
+                continue
+
+            end = index + 1
+            while end < len(ordered) and self._can_run_parallel(ordered[end]):
+                end += 1
+            group = ordered[index:end]
+            if len(group) == 1:
+                call = group[0]
+                self.on_event(
+                    "tool_start", {"name": call.name, "arguments": call.arguments}
+                )
+                yield call, self._execute_call(call.name, call.arguments)
+            else:
+                for call in group:
+                    self.on_event(
+                        "tool_start", {"name": call.name, "arguments": call.arguments}
+                    )
+                with ThreadPoolExecutor(
+                    max_workers=min(self.max_parallel_tools, len(group)),
+                    thread_name_prefix="coding-agent-tool",
+                ) as executor:
+                    futures = [
+                        executor.submit(self._execute_call, call.name, call.arguments)
+                        for call in group
+                    ]
+                    group_results = [future.result() for future in futures]
+                for call, result in zip(group, group_results):
+                    yield call, result
+            index = end
+
+    def _can_run_parallel(self, call: ToolCall) -> bool:
+        try:
+            arguments = json.loads(call.arguments)
+        except json.JSONDecodeError:
+            return False
+        if not isinstance(arguments, dict):
+            return False
+        checker = getattr(self.tools, "can_run_parallel", None)
+        return bool(checker and checker(call.name, arguments))
 
     def _summarize(self, old_conversation: str) -> str:
         self.on_event("summary_start", {})

@@ -37,6 +37,16 @@ class DevOpsToolProvider:
             "compose_stop",
         }
     )
+    _PARALLEL_SAFE_TOOLS = frozenset(
+        {
+            "devops_inspect",
+            "compose_preflight",
+            "compose_status",
+            "compose_logs",
+            "compose_releases",
+            "compose_verify",
+        }
+    )
 
     def __init__(
         self,
@@ -216,6 +226,9 @@ class DevOpsToolProvider:
 
     def schemas(self) -> list[dict[str, Any]]:
         return list(self._schemas)
+
+    def can_run_parallel(self, name: str, _arguments: dict[str, Any]) -> bool:
+        return name in self._PARALLEL_SAFE_TOOLS
 
     def execute(self, name: str, arguments: dict[str, Any]) -> ToolResult:
         handler = self._handlers.get(name)

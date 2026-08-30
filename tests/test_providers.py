@@ -61,6 +61,14 @@ def test_default_provider_adds_git_and_devops_tools_for_selected_workspace(tmp_p
     assert "compose_release" in names
     assert "compose_rollback_plan" in names
     assert "compose_rollback" in names
+    assert "batch_write_files" in names
+    assert "batch_replace_text" in names
+    assert tools.can_run_parallel("read_file", {"path": "README.md"}) is True
+    assert tools.can_run_parallel("git_status", {}) is True
+    assert tools.can_run_parallel("compose_status", {}) is True
+    assert tools.can_run_parallel("write_file", {"path": "a", "content": "x"}) is False
+    assert tools.can_run_parallel("git_commit", {"message": "x"}) is False
+    assert tools.can_run_parallel("compose_deploy", {}) is False
     assert getattr(tools, "change_tracker", None) is tracker
 
 

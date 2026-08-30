@@ -18,6 +18,8 @@ class ToolProvider(Protocol):
 
     def execute(self, name: str, arguments: dict[str, Any]) -> ToolResult: ...
 
+    def can_run_parallel(self, name: str, arguments: dict[str, Any]) -> bool: ...
+
 
 class CompositeToolProvider:
     """Expose multiple providers as one deterministic tool namespace."""
@@ -52,6 +54,11 @@ class CompositeToolProvider:
         from .tools import ToolResult
 
         return ToolResult(False, error=f"未知工具: {name}")
+
+    def can_run_parallel(self, name: str, arguments: dict[str, Any]) -> bool:
+        owner = self._owners.get(name)
+        checker = getattr(owner, "can_run_parallel", None)
+        return bool(checker and checker(name, arguments))
 
 
 def build_default_tool_provider(

@@ -6,6 +6,7 @@ import os
 import signal
 import shutil
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -18,6 +19,9 @@ from .safety import CommandPolicy, RiskLevel
 
 MAX_FILE_CHARS = 200_000
 MAX_TOOL_OUTPUT = 16_000
+MAX_BATCH_FILES = 50
+MAX_BATCH_CHARS = 1_000_000
+MAX_BATCH_ROLLBACK_BYTES = 10_000_000
 ApprovalCallback = Callable[[str, RiskLevel, str], bool]
 CancelCallback = Callable[[], bool]
 
@@ -78,6 +82,11 @@ class LocalTool:
 
 
 class ToolRegistry:
+    _PARALLEL_SAFE_TOOLS = frozenset({"list_files", "read_file", "search_text"})
+    _FILE_MUTATION_TOOLS = frozenset(
+        {"write_file", "replace_text", "batch_write_files", "batch_replace_text"}
+    )
+
     def __init__(
         self,
         workspace: Path | None,
@@ -107,6 +116,9 @@ class ToolRegistry:
     def schemas(self) -> list[dict[str, Any]]:
         return [tool.schema() for tool in self._tools.values()]
 
+    def can_run_parallel(self, name: str, _arguments: dict[str, Any]) -> bool:
+        return name in self._PARALLEL_SAFE_TOOLS
+
     def execute(self, name: str, arguments: dict[str, Any]) -> ToolResult:
         if self.workspace is None:
             return ToolResult(False, error="当前对话尚未选择工作目录")
@@ -117,10 +129,13 @@ class ToolRegistry:
         if validation_error:
             return ToolResult(False, error=validation_error)
 
-        if name in {"write_file", "replace_text"} and self.approval_mode == "request":
-            path = str(arguments.get("path", ""))
+        if name in self._FILE_MUTATION_TOOLS and self.approval_mode == "request":
+            paths = self._mutation_paths(name, arguments)
+            target = ", ".join(paths[:5])
+            if len(paths) > 5:
+                target += f" 等 {len(paths)} 个文件"
             if not self.approver(
-                f"{name} {path}",
+                f"{name} {target}",
                 RiskLevel.REVIEW,
                 "请求批准模式下，修改文件需要确认",
             ):
@@ -128,8 +143,10 @@ class ToolRegistry:
 
         capture: Capture | None = None
         try:
-            if self.change_tracker and name in {"write_file", "replace_text"} and self._inside_workspace(str(arguments["path"])):
-                capture = self.change_tracker.capture_paths([str(arguments["path"])])
+            mutation_paths = self._mutation_paths(name, arguments)
+            tracked_paths = [path for path in mutation_paths if self._inside_workspace(path)]
+            if self.change_tracker and tracked_paths:
+                capture = self.change_tracker.capture_paths(tracked_paths)
             elif self.change_tracker and name == "run_command":
                 capture = self.change_tracker.capture_workspace()
             result = tool.handler(arguments)
@@ -157,7 +174,13 @@ class ToolRegistry:
             unknown = set(arguments) - set(properties)
             if unknown:
                 return f"未知参数: {', '.join(sorted(unknown))}"
-        python_types = {"string": str, "integer": int, "boolean": bool}
+        python_types = {
+            "string": str,
+            "integer": int,
+            "boolean": bool,
+            "array": list,
+            "object": dict,
+        }
         for key, value in arguments.items():
             expected = properties.get(key, {}).get("type")
             expected_type = python_types.get(expected)
@@ -169,6 +192,12 @@ class ToolRegistry:
                 return f"参数 {key} 不能小于 {minimum}"
             if isinstance(value, int) and maximum is not None and value > maximum:
                 return f"参数 {key} 不能大于 {maximum}"
+            minimum_items = properties.get(key, {}).get("minItems")
+            maximum_items = properties.get(key, {}).get("maxItems")
+            if isinstance(value, list) and minimum_items is not None and len(value) < minimum_items:
+                return f"参数 {key} 至少需要 {minimum_items} 项"
+            if isinstance(value, list) and maximum_items is not None and len(value) > maximum_items:
+                return f"参数 {key} 不能超过 {maximum_items} 项"
         return None
 
     def _build_tools(self) -> list[LocalTool]:
@@ -250,6 +279,60 @@ class ToolRegistry:
                 self._replace_text,
             ),
             LocalTool(
+                "batch_write_files",
+                "批量创建或完整覆盖多个 UTF-8 文本文件；全部操作预检成功后才写入，提交失败时回滚。",
+                {
+                    "type": "object",
+                    "properties": {
+                        "files": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": MAX_BATCH_FILES,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "path": common_path,
+                                    "content": {"type": "string"},
+                                },
+                                "required": ["path", "content"],
+                                "additionalProperties": False,
+                            },
+                        }
+                    },
+                    "required": ["files"],
+                    "additionalProperties": False,
+                },
+                self._batch_write_files,
+            ),
+            LocalTool(
+                "batch_replace_text",
+                "在多个 UTF-8 文本文件中执行精确替换；全部匹配预检成功后才写入。",
+                {
+                    "type": "object",
+                    "properties": {
+                        "replacements": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": MAX_BATCH_FILES,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "path": common_path,
+                                    "old_text": {"type": "string"},
+                                    "new_text": {"type": "string"},
+                                    "replace_all": {"type": "boolean", "default": False},
+                                },
+                                "required": ["path", "old_text", "new_text"],
+                                "additionalProperties": False,
+                            },
+                        }
+                    },
+                    "required": ["replacements"],
+                    "additionalProperties": False,
+                },
+                self._batch_replace_text,
+            ),
+            LocalTool(
                 "run_command",
                 "在工作区中执行本地 shell 命令，返回退出码和截断后的输出。",
                 {
@@ -264,6 +347,22 @@ class ToolRegistry:
                 self._run_command,
             ),
         ]
+
+    @staticmethod
+    def _mutation_paths(name: str, arguments: dict[str, Any]) -> list[str]:
+        if name in {"write_file", "replace_text"}:
+            path = arguments.get("path")
+            return [path] if isinstance(path, str) else []
+        if name == "batch_write_files":
+            key = "files"
+        elif name == "batch_replace_text":
+            key = "replacements"
+        else:
+            return []
+        items = arguments.get(key)
+        if not isinstance(items, list):
+            return []
+        return [str(item["path"]) for item in items if isinstance(item, dict) and isinstance(item.get("path"), str)]
 
     def _inside_workspace(self, user_path: str) -> bool:
         if self.workspace is None or self.guard is None:
@@ -380,6 +479,203 @@ class ToolRegistry:
         path.write_text(updated, encoding="utf-8")
         replacements = count if replace_all else 1
         return ToolResult(True, f"已在 {self._display_path(path)} 中替换 {replacements} 处")
+
+    def _batch_write_files(self, args: dict[str, Any]) -> ToolResult:
+        raw_files = args.get("files")
+        self._validate_batch_collection(raw_files, "files")
+        updates: list[tuple[Path, str]] = []
+        details: list[dict[str, Any]] = []
+        seen: set[Path] = set()
+        total_chars = 0
+        for index, item in enumerate(raw_files):
+            self._validate_batch_item(item, index, {"path", "content"}, {"path", "content"})
+            path_value = item["path"]
+            content = item["content"]
+            if not isinstance(path_value, str) or not path_value:
+                raise ValueError(f"files[{index}].path 必须是非空字符串")
+            if not isinstance(content, str):
+                raise ValueError(f"files[{index}].content 必须是字符串")
+            if len(content) > MAX_FILE_CHARS:
+                raise ValueError(
+                    f"files[{index}].content 不能超过 {MAX_FILE_CHARS} 个字符"
+                )
+            total_chars += len(content)
+            if total_chars > MAX_BATCH_CHARS:
+                raise ValueError(f"批量写入总内容不能超过 {MAX_BATCH_CHARS} 个字符")
+            path = self.guard.resolve(path_value)
+            if path in seen:
+                raise ValueError(f"批量操作包含重复路径: {path_value}")
+            if path.exists() and not path.is_file():
+                raise ValueError(f"目标路径不是文件: {path_value}")
+            seen.add(path)
+            updates.append((path, content))
+            details.append(
+                {
+                    "path": self._display_path(path),
+                    "action": "updated" if path.exists() else "created",
+                    "characters": len(content),
+                }
+            )
+
+        self._commit_batch(updates)
+        return ToolResult(True, self._batch_output(details))
+
+    def _batch_replace_text(self, args: dict[str, Any]) -> ToolResult:
+        raw_replacements = args.get("replacements")
+        self._validate_batch_collection(raw_replacements, "replacements")
+        updates: list[tuple[Path, str]] = []
+        details: list[dict[str, Any]] = []
+        seen: set[Path] = set()
+        total_chars = 0
+        allowed = {"path", "old_text", "new_text", "replace_all"}
+        required = {"path", "old_text", "new_text"}
+        for index, item in enumerate(raw_replacements):
+            self._validate_batch_item(item, index, allowed, required)
+            path_value = item["path"]
+            old_text = item["old_text"]
+            new_text = item["new_text"]
+            replace_all = item.get("replace_all", False)
+            if not isinstance(path_value, str) or not path_value:
+                raise ValueError(f"replacements[{index}].path 必须是非空字符串")
+            if not isinstance(old_text, str) or not old_text:
+                raise ValueError(f"replacements[{index}].old_text 必须是非空字符串")
+            if not isinstance(new_text, str):
+                raise ValueError(f"replacements[{index}].new_text 必须是字符串")
+            if not isinstance(replace_all, bool):
+                raise ValueError(f"replacements[{index}].replace_all 必须是 boolean")
+            path = self.guard.resolve(path_value, must_exist=True)
+            if path in seen:
+                raise ValueError(f"批量操作包含重复路径: {path_value}")
+            if not path.is_file():
+                raise ValueError(f"path 不是文件: {path_value}")
+            text = path.read_text(encoding="utf-8")
+            if len(text) > MAX_FILE_CHARS:
+                raise ValueError(f"文件超过批量替换上限: {path_value}")
+            count = text.count(old_text)
+            if count == 0:
+                raise ValueError(f"未在 {path_value} 中找到 old_text")
+            if count > 1 and not replace_all:
+                raise ValueError(
+                    f"{path_value} 中 old_text 出现 {count} 次；请提供更精确文本或启用 replace_all"
+                )
+            updated = text.replace(old_text, new_text, -1 if replace_all else 1)
+            if len(updated) > MAX_FILE_CHARS:
+                raise ValueError(f"替换后的文件超过 {MAX_FILE_CHARS} 个字符: {path_value}")
+            total_chars += len(updated)
+            if total_chars > MAX_BATCH_CHARS:
+                raise ValueError(f"批量替换总内容不能超过 {MAX_BATCH_CHARS} 个字符")
+            seen.add(path)
+            updates.append((path, updated))
+            details.append(
+                {
+                    "path": self._display_path(path),
+                    "replacements": count if replace_all else 1,
+                }
+            )
+
+        self._commit_batch(updates)
+        return ToolResult(True, self._batch_output(details))
+
+    def _batch_output(self, details: list[dict[str, Any]]) -> str:
+        payload: dict[str, Any] = {"count": len(details), "files": details}
+        rendered = json.dumps(payload, ensure_ascii=False, indent=2)
+        if len(rendered) <= self.max_output:
+            return rendered
+        kept: list[dict[str, Any]] = []
+        for detail in details:
+            candidate = {
+                "count": len(details),
+                "files": [*kept, detail],
+                "omitted": len(details) - len(kept) - 1,
+            }
+            if len(json.dumps(candidate, ensure_ascii=False, indent=2)) > self.max_output:
+                break
+            kept.append(detail)
+        compact = {
+            "count": len(details),
+            "files": kept,
+            "omitted": len(details) - len(kept),
+        }
+        return json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
+
+    @staticmethod
+    def _validate_batch_collection(value: Any, name: str) -> None:
+        if not isinstance(value, list):
+            raise ValueError(f"参数 {name} 必须是 array")
+        if not value:
+            raise ValueError(f"参数 {name} 至少需要 1 项")
+        if len(value) > MAX_BATCH_FILES:
+            raise ValueError(f"参数 {name} 不能超过 {MAX_BATCH_FILES} 项")
+
+    @staticmethod
+    def _validate_batch_item(
+        item: Any,
+        index: int,
+        allowed: set[str],
+        required: set[str],
+    ) -> None:
+        if not isinstance(item, dict):
+            raise ValueError(f"批量操作第 {index + 1} 项必须是 JSON 对象")
+        missing = required - set(item)
+        if missing:
+            raise ValueError(
+                f"批量操作第 {index + 1} 项缺少参数: {', '.join(sorted(missing))}"
+            )
+        unknown = set(item) - allowed
+        if unknown:
+            raise ValueError(
+                f"批量操作第 {index + 1} 项包含未知参数: {', '.join(sorted(unknown))}"
+            )
+
+    def _commit_batch(self, updates: list[tuple[Path, str]]) -> None:
+        originals: dict[Path, bytes | None] = {}
+        rollback_bytes = 0
+        for path, _content in updates:
+            original = path.read_bytes() if path.exists() else None
+            if original is not None:
+                rollback_bytes += len(original)
+                if rollback_bytes > MAX_BATCH_ROLLBACK_BYTES:
+                    raise ValueError(
+                        f"批量操作原文件总计不能超过 {MAX_BATCH_ROLLBACK_BYTES} 字节"
+                    )
+            originals[path] = original
+
+        staged: dict[Path, Path] = {}
+        committed: list[Path] = []
+        try:
+            for path, content in updates:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                descriptor, temporary_name = tempfile.mkstemp(
+                    prefix=".coding-agent-",
+                    suffix=".tmp",
+                    dir=path.parent,
+                )
+                temporary = Path(temporary_name)
+                staged[path] = temporary
+                with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+                    handle.write(content)
+            for path, _content in updates:
+                os.replace(staged[path], path)
+                staged.pop(path, None)
+                committed.append(path)
+        except Exception as exc:
+            rollback_errors: list[str] = []
+            for path in reversed(committed):
+                try:
+                    original = originals[path]
+                    if original is None:
+                        path.unlink(missing_ok=True)
+                    else:
+                        path.write_bytes(original)
+                except OSError as rollback_exc:
+                    rollback_errors.append(f"{self._display_path(path)}: {rollback_exc}")
+            detail = f"批量写入失败，已回滚: {exc}"
+            if rollback_errors:
+                detail += f"；回滚异常: {'; '.join(rollback_errors)}"
+            raise OSError(detail) from exc
+        finally:
+            for temporary in staged.values():
+                temporary.unlink(missing_ok=True)
 
     def _run_command(self, args: dict[str, Any]) -> ToolResult:
         command = args["command"]

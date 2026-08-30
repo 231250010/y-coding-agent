@@ -121,6 +121,9 @@ class GitToolProvider:
     def schemas(self) -> list[dict[str, Any]]:
         return list(self._schemas)
 
+    def can_run_parallel(self, name: str, _arguments: dict[str, Any]) -> bool:
+        return name in self._QUERY_TOOLS
+
     def execute(self, name: str, arguments: dict[str, Any]) -> ToolResult:
         handler = self._handlers.get(name)
         if handler is None:

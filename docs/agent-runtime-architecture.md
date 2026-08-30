@@ -53,6 +53,7 @@ CodingAgent
         ├── ToolRegistry (files / command)
         ├── TaskListToolProvider -> TaskListState
         ├── GitToolProvider -> GitService
+        ├── GitHubActionsToolProvider -> GitHubActionsService -> gh CLI
         └── DevOpsToolProvider -> DevOpsService -> Docker CLI / Context
 ```
 
@@ -63,7 +64,7 @@ CodingAgent
 3. `CodingAgent` 在预算阈值处把旧滚动摘要和新淘汰轮次合并为唯一的新摘要，再调用模型并附带本地工具 Schema。
 
 上下文裁剪采用软、硬两级预算。超过软阈值时只滚动摘要旧完整轮次，旧工具输出在进入摘要请求前以头尾保留方式限长；最近两轮不因软阈值截断。只有摘要后的消息仍超过硬上限时，才按时间从旧到新缩减近期工具结果，并同时保留开头、结尾和省略量，尽量保住命令尾部的错误与测试总结。
-4. 模型返回工具调用时，组合提供者按工具名路由。
+4. 模型返回工具调用时，组合提供者按工具名路由。连续且由提供者显式声明为只读的调用进入最多四线程的并行批次；未声明、参数无效或会改变状态的调用形成串行屏障。并行结果始终按原始 tool call 顺序写回，保持模型协议确定性。
 5. 工具进行参数、路径和权限检查；DevOps 长操作同时回传阶段、环境、耗时和完成比例，执行后返回结构化结果。
 6. Agent 把 `tool` 消息交回模型，并把展示事件交给 `WebRuntime`。
 7. 浏览器轮询 `/api/state`，渲染进度、审批、最终答复和文件改动。
@@ -78,9 +79,10 @@ CodingAgent
 
 ## 工具组合与 Git
 
-`build_default_tool_provider()` 为有工作目录的对话组合四组工具：
+`build_default_tool_provider()` 为有工作目录的对话组合五组工具：
 
-- 文件与命令：浏览、读取、搜索、写入、精确替换和受控命令；
+- 文件与命令：浏览、读取、搜索、单文件或批量写入、单文件或批量精确替换和受控命令；批量操作限制文件数和总内容，全量预检通过后才提交，提交异常时恢复原文件；
+- 任务计划：维护独立持久化的目标、阶段、进度与阻塞原因；
 - Git：status、diff、log、branches、create branch、stage、unstage、commit、pull 和 push。
 - GitHub Actions：按 Commit 查询状态、读取失败日志，以及人工确认后重跑失败任务；
 - DevOps：inspect、preflight、build、pull、deploy、status、logs、verify、restart、stop、版本发布和两阶段回滚。
@@ -97,7 +99,7 @@ DevOps 控制面以 Docker Compose 为第一阶段目标。默认使用当前 Do
 
 版本发布先生成只读门禁预览，逐项展示命令并按参数数组分类。Shell 和内联解释器直接拒绝，未知命令及本次任务修改过的门禁配置在 `full` 模式下也强制审批；审批绑定 `coding-agent.toml` SHA-256，服务执行前再次校验，避免确认后的配置替换。门禁随后采集 Git Commit、分支、脏工作区状态、Compose 摘要和检查结果；失败时不执行 Docker 变更。健康验证后记录 Compose 镜像引用和镜像 ID，并按环境维护活动版本。回滚计划与执行分离：计划只读、十分钟过期且只能使用一次；执行工具无视 `full` 权限豁免，始终创建人工审批。回滚先记录当前镜像现场，再检查历史镜像、恢复标签、使用 `--no-build` 重建服务并重新验证。数据库和数据卷明确位于自动回滚边界之外。
 
-无工作目录的对话不暴露本地工具，仍可处理一般问答。
+无工作目录的对话只暴露任务清单工具，不暴露文件、Git、CI 或 DevOps 工具，仍可处理一般问答。
 
 ## 权限与审批
 

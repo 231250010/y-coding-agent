@@ -50,7 +50,7 @@
 
 - `agent.py`：自主循环、模型输出解析、工具结果回传和终止条件。
 - `model.py`：`openai` 基础客户端的薄适配层，不包含 Agent 逻辑。
-- `tools.py`：工具 Schema、参数校验和六个本地工具。
+- `tools.py`：文件、搜索、批量编辑和受控命令工具的 Schema、校验与执行。
 - `git_service.py` / `git_tools.py`：结构化 Git 控制面和审批规则。
 - `worktree_service.py`：为网页对话创建任务级 Git 分支和隔离工作区。
 - `github_actions_service.py` / `github_actions_tools.py`：基于本机 `gh` CLI 的 CI 状态、失败日志和重跑控制面。
@@ -152,6 +152,8 @@ python -m coding_agent --no-browser
 | `search_text` | 搜索文本 | 优先 `rg`，提供纯 Python 回退 |
 | `write_file` | 创建或覆盖文本文件 | 限制单次内容大小 |
 | `replace_text` | 精确替换文本 | 默认要求唯一匹配 |
+| `batch_write_files` | 创建或覆盖多个文本文件 | 最多 50 个文件；全部预检后写入，失败时回滚 |
+| `batch_replace_text` | 跨文件精确替换文本 | 最多 50 个文件；逐文件验证匹配，避免半完成状态 |
 | `run_command` | 执行工作区命令 | 风险分类、确认、超时和输出截断 |
 | `update_task_list` | 更新当前对话的目标、阶段、状态和阻塞原因 | 每次提交完整快照；最多 20 项且最多一个进行中阶段 |
 | `git_status` / `git_diff` | 查询分支、上游、文件状态以及工作区/暂存区 Diff | 只读；支持限定工作区相对路径 |
@@ -356,7 +358,7 @@ python -m pytest
 ## 已知限制
 
 - 服务只供本机单用户使用，不提供身份认证或远程部署。
-- 多个工具调用按模型返回顺序串行执行。
+- 同一响应中连续的只读工具调用最多四路并行，结果仍按模型返回顺序写回；写入、Git 变更、审批、任务状态和 DevOps 变更均作为串行屏障。
 - 只处理 UTF-8 文本文件，不编辑二进制文件。
 - 不自动提交 Git；结构化提交只会在模型明确调用且权限规则允许时执行。
 - 暂不提供 Git 图形 merge/rebase、自动清理 worktree、PR 创建、插件系统或自主网络搜索。

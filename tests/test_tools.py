@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 from pathlib import Path
 
@@ -72,6 +73,108 @@ def test_write_and_replace_report_cumulative_local_changes(tmp_path: Path) -> No
     assert replaced.changes.paths == ("a.txt",)
     assert (tracker.changes["a.txt"].added, tracker.changes["a.txt"].deleted) == (2, 0)
     assert "changes" not in written.to_message()
+
+
+def test_batch_write_and_replace_report_structured_results_and_changes(tmp_path: Path) -> None:
+    tracker = ConversationChangeTracker(tmp_path)
+    tools = ToolRegistry(tmp_path, approver=lambda *_args: True, change_tracker=tracker)
+
+    written = tools.execute(
+        "batch_write_files",
+        {
+            "files": [
+                {"path": "a.txt", "content": "alpha\n"},
+                {"path": "nested/b.txt", "content": "beta\n"},
+            ]
+        },
+    )
+    replaced = tools.execute(
+        "batch_replace_text",
+        {
+            "replacements": [
+                {"path": "a.txt", "old_text": "alpha", "new_text": "A"},
+                {"path": "nested/b.txt", "old_text": "beta", "new_text": "B"},
+            ]
+        },
+    )
+
+    assert written.ok and json.loads(written.output)["count"] == 2
+    assert written.changes.paths == ("a.txt", "nested/b.txt")
+    assert replaced.ok and json.loads(replaced.output)["count"] == 2
+    assert replaced.changes.paths == ("a.txt", "nested/b.txt")
+    assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "A\n"
+    assert (tmp_path / "nested" / "b.txt").read_text(encoding="utf-8") == "B\n"
+
+
+def test_batch_replace_preflight_prevents_partial_writes(tmp_path: Path) -> None:
+    first = tmp_path / "a.txt"
+    second = tmp_path / "b.txt"
+    first.write_text("old-a", encoding="utf-8")
+    second.write_text("old-b", encoding="utf-8")
+
+    result = registry(tmp_path).execute(
+        "batch_replace_text",
+        {
+            "replacements": [
+                {"path": "a.txt", "old_text": "old-a", "new_text": "new-a"},
+                {"path": "b.txt", "old_text": "missing", "new_text": "new-b"},
+            ]
+        },
+    )
+
+    assert not result.ok and "未在 b.txt 中找到" in (result.error or "")
+    assert first.read_text(encoding="utf-8") == "old-a"
+    assert second.read_text(encoding="utf-8") == "old-b"
+
+
+def test_batch_write_rolls_back_when_commit_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    first = tmp_path / "a.txt"
+    second = tmp_path / "b.txt"
+    first.write_text("before-a", encoding="utf-8")
+    second.write_text("before-b", encoding="utf-8")
+    import coding_agent.tools as tools_module
+
+    real_replace = tools_module.os.replace
+    calls = 0
+
+    def fail_second_replace(source: str, destination: str) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("simulated commit failure")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(tools_module.os, "replace", fail_second_replace)
+    result = registry(tmp_path).execute(
+        "batch_write_files",
+        {
+            "files": [
+                {"path": "a.txt", "content": "after-a"},
+                {"path": "b.txt", "content": "after-b"},
+            ]
+        },
+    )
+
+    assert not result.ok and "已回滚" in (result.error or "")
+    assert first.read_text(encoding="utf-8") == "before-a"
+    assert second.read_text(encoding="utf-8") == "before-b"
+
+
+def test_batch_operations_reject_duplicate_paths(tmp_path: Path) -> None:
+    result = registry(tmp_path).execute(
+        "batch_write_files",
+        {
+            "files": [
+                {"path": "same.txt", "content": "one"},
+                {"path": "./same.txt", "content": "two"},
+            ]
+        },
+    )
+
+    assert not result.ok and "重复路径" in (result.error or "")
+    assert not (tmp_path / "same.txt").exists()
 
 
 def test_failed_replace_that_does_not_write_has_no_changes(tmp_path: Path) -> None:
