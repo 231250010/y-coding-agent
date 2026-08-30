@@ -98,3 +98,8 @@ def test_environment_locks_are_isolated_by_identity(tmp_path: Path) -> None:
     with first, second:
         assert first.path.is_file()
         assert second.path.is_file()
+        owner = store.environment_owner("workspace|current|staging")
+        assert owner["operation"] == "deploy"
+        assert owner["environment"] == "staging"
+
+    assert store.environment_owner("workspace|current|staging") == {}

@@ -60,12 +60,15 @@ def build_default_tool_provider(
     is_cancelled: Callable[[], bool] | None = None,
     on_progress: Callable[[dict[str, Any]], None] | None = None,
     devops_state_root: Path | None = None,
+    devops_release_identity_workspace: Path | None = None,
     approval_mode: str = "risk",
     change_tracker: ConversationChangeTracker | None = None,
 ) -> ToolProvider:
     """Compose file/command, Git, and Docker Compose DevOps tools."""
     from .git_service import GitService
     from .git_tools import GitToolProvider
+    from .github_actions_service import GitHubActionsService
+    from .github_actions_tools import GitHubActionsToolProvider
     from .devops_service import DevOpsService
     from .devops_tools import DevOpsToolProvider
     from .tools import ToolRegistry
@@ -85,15 +88,19 @@ def build_default_tool_provider(
         approval_mode=approval_mode,
         change_tracker=change_tracker,
     )
+    actions_service = GitHubActionsService(workspace, is_cancelled=is_cancelled)
+    actions = GitHubActionsToolProvider(actions_service, approver=approver)
     devops = DevOpsToolProvider(
         DevOpsService(
             workspace,
             is_cancelled=is_cancelled,
             on_progress=on_progress,
             release_state_root=devops_state_root,
+            release_identity_workspace=devops_release_identity_workspace,
+            github_actions=actions_service,
         ),
         approver=approver,
         approval_mode=approval_mode,
         change_tracker=change_tracker,
     )
-    return CompositeToolProvider([local, git, devops])
+    return CompositeToolProvider([local, git, actions, devops])

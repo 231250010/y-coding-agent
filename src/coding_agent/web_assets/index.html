@@ -39,6 +39,8 @@
           <div class="title-line"><h1 id="conversation-title">新对话</h1><span id="run-status" class="status-pill">就绪</span></div>
           <button id="workspace-button" class="workspace-button" type="button">尚未选择工作目录</button>
         </div>
+        <button id="create-worktree" class="header-tool worktree-tool" type="button"><span aria-hidden="true">⑂</span> 隔离</button>
+        <button id="open-operations" class="header-tool" type="button"><span aria-hidden="true">◫</span> 发布台</button>
         <button id="rename-current" class="icon-button" type="button" aria-label="对话菜单">•••</button>
       </header>
       <section id="operation-progress" class="operation-progress" aria-live="polite" hidden>
@@ -89,12 +91,21 @@
     </main>
 
     <aside id="diff-panel" class="diff-panel" aria-label="文件改动审查" aria-hidden="true">
-      <header class="diff-header">
-        <div><p>当前对话累计改动</p><h2 id="diff-path">选择一个文件</h2></div>
-        <div class="diff-header-actions"><span id="diff-counts" class="diff-counts"><b>+0</b><i>−0</i></span><button id="close-diff" class="icon-button" type="button" aria-label="关闭文件改动">×</button></div>
-      </header>
-      <p id="diff-warning" class="diff-warning" hidden></p>
-      <div id="diff-content" class="diff-content" role="table" aria-label="行级文件差异"></div>
+      <section id="diff-view">
+        <header class="diff-header">
+          <div><p>当前对话累计改动</p><h2 id="diff-path">选择一个文件</h2></div>
+          <div class="diff-header-actions"><span id="diff-counts" class="diff-counts"><b>+0</b><i>−0</i></span><button id="close-diff" class="icon-button" type="button" aria-label="关闭文件改动">×</button></div>
+        </header>
+        <p id="diff-warning" class="diff-warning" hidden></p>
+        <div id="diff-content" class="diff-content" role="table" aria-label="行级文件差异"></div>
+      </section>
+      <section id="operations-view" class="operations-view" hidden>
+        <header class="operations-header">
+          <div><p>RELEASE CONTROL</p><h2>环境与发布</h2></div>
+          <div class="operations-head-actions"><button id="refresh-operations" class="quiet-button compact" type="button">刷新</button><button id="close-operations" class="icon-button" type="button" aria-label="关闭发布台">×</button></div>
+        </header>
+        <div id="operations-content" class="operations-content" aria-live="polite"></div>
+      </section>
     </aside>
   </div>
 
@@ -108,6 +119,16 @@
         <button id="browse-workspace" class="quiet-button" type="button">浏览本机…</button>
       </div>
       <div class="dialog-actions"><button class="quiet-button dialog-close" type="button">取消</button><button class="primary-button" type="submit">使用此目录</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="worktree-dialog">
+    <form id="worktree-form" class="dialog-card">
+      <header><div><small>GIT WORKTREE</small><h2>创建任务隔离工作区</h2></div><button class="icon-button dialog-close" type="button" aria-label="关闭">×</button></header>
+      <p>从当前 HEAD 创建独立分支和 worktree。之后 Agent、Diff、测试与部署只作用于隔离目录，主工作区不会自动合并或删除。</p>
+      <div class="worktree-preview"><span>来源工作区</span><code id="worktree-source">尚未选择</code><span>任务分支</span><code id="worktree-branch-preview">创建后自动生成</code></div>
+      <p class="dialog-note">建议在任务开始前启用。完成后请先检查 Diff、提交隔离分支，再自行创建 PR 或合并。</p>
+      <div class="dialog-actions"><button class="quiet-button dialog-close" type="button">取消</button><button id="confirm-worktree" class="primary-button" type="submit">创建隔离工作区</button></div>
     </form>
   </dialog>
 

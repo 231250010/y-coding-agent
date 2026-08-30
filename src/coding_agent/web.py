@@ -134,6 +134,8 @@ class LocalRequestHandler(BaseHTTPRequestHandler):
                 return 200, {
                     "task": runtime.set_permission_mode(task_id, self._string(payload, "mode"))
                 }
+            if method == "POST" and action == "worktree":
+                return 201, {"task": runtime.create_task_worktree(task_id)}
             if method == "POST" and action == "pick-workspace":
                 runtime.ensure_workspace_change_allowed(task_id)
                 selected = self.server.directory_picker(self._optional_string(payload, "initial"))
@@ -156,6 +158,8 @@ class LocalRequestHandler(BaseHTTPRequestHandler):
                 if not change_path:
                     raise RuntimeNotFound("文件改动不存在")
                 return 200, {"change": runtime.diff(task_id, change_path)}
+            if method == "GET" and action == "devops-overview":
+                return 200, {"overview": runtime.devops_overview(task_id)}
 
         approval_prefix = "/api/approvals/"
         if method == "POST" and path.startswith(approval_prefix):

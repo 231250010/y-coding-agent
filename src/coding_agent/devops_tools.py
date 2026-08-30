@@ -307,6 +307,7 @@ class DevOpsToolProvider:
             "environment": preview["environment"],
             "require_git": preview.get("require_git", False),
             "require_clean_worktree": preview.get("require_clean_worktree", False),
+            "github_actions": preview.get("github_actions", {}),
             "config_changed_in_task": config_changed,
             "checks": checks,
         }

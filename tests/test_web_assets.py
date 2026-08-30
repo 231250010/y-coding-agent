@@ -116,3 +116,40 @@ def test_devops_progress_rail_and_cancel_control_are_wired() -> None:
     assert 'document.querySelector("#cancel-operation").addEventListener("click", stopTask)' in javascript
     assert ".operation-stages" in css
     assert "@media (prefers-reduced-motion: reduce)" in css
+
+
+def test_release_console_exposes_environment_health_and_release_rail() -> None:
+    html = asset("index.html")
+    javascript = asset("app.js")
+    css = asset("app.css")
+
+    assert 'id="open-operations"' in html
+    assert 'id="operations-view"' in html
+    assert 'id="refresh-operations"' in html
+    assert "function openOperations()" in javascript
+    assert "/devops-overview" in javascript
+    assert "function environmentNode(environment)" in javascript
+    assert "生成回滚计划" in javascript
+    for selector in [
+        ".operations-manifest",
+        ".environment-card",
+        ".service-chip",
+        ".release-rail",
+        ".release-entry",
+    ]:
+        assert selector in css
+
+
+def test_worktree_isolation_requires_explicit_dialog_confirmation() -> None:
+    html = asset("index.html")
+    javascript = asset("app.js")
+    css = asset("app.css")
+
+    assert 'id="create-worktree"' in html
+    assert 'id="worktree-dialog"' in html
+    assert 'id="worktree-form"' in html
+    assert "function createTaskWorktree(event)" in javascript
+    assert 'method: "POST", body: {}' in javascript
+    assert "/worktree`" in javascript
+    assert ".worktree-tool.active" in css
+    assert ".worktree-preview" in css

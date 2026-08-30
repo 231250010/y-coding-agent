@@ -507,6 +507,88 @@ timeout_seconds = 60
     assert recorded["provenance"] == result["provenance"]
 
 
+def test_release_requires_actions_success_and_audits_run_ids(tmp_path: Path) -> None:
+    write_compose(tmp_path)
+    (tmp_path / "coding-agent.toml").write_text(
+        """[devops]
+compose_file = "compose.yaml"
+[devops.github_actions]
+require_success = true
+workflows = ["tests", "lint"]
+""",
+        encoding="utf-8",
+    )
+    gate = FakeDockerRunner()
+    gate.add(str(tmp_path))
+    gate.add("c" * 40)
+    gate.add("main")
+    gate.add("")
+    docker = FakeDockerRunner()
+    add_release_responses(docker, "sha256:444444444444")
+
+    class Actions:
+        def status(self, commit: str | None, *, workflows: Sequence[str]) -> dict[str, object]:
+            assert commit == "c" * 40
+            assert list(workflows) == ["tests", "lint"]
+            return {
+                "commit": commit,
+                "overall": "success",
+                "successful": True,
+                "runs": [
+                    {"run_id": 101, "workflow": "tests"},
+                    {"run_id": 102, "workflow": "lint"},
+                ],
+            }
+
+    service = DevOpsService(
+        tmp_path,
+        docker,
+        gate_runner=gate,
+        github_actions=Actions(),  # type: ignore[arg-type]
+    )
+    result = service.release("v1")
+
+    actions = result["provenance"]["github_actions"]
+    assert actions["required"] is True
+    assert [item["run_id"] for item in actions["status"]["runs"]] == [101, 102]
+
+
+def test_release_stops_before_docker_when_actions_failed(tmp_path: Path) -> None:
+    write_compose(tmp_path)
+    (tmp_path / "coding-agent.toml").write_text(
+        """[devops]
+compose_file = "compose.yaml"
+[devops.github_actions]
+require_success = true
+""",
+        encoding="utf-8",
+    )
+    gate = FakeDockerRunner()
+    gate.add(str(tmp_path))
+    gate.add("d" * 40)
+    gate.add("main")
+    gate.add("")
+    docker = FakeDockerRunner()
+
+    class Actions:
+        def status(self, _commit: str | None, *, workflows: Sequence[str]) -> dict[str, object]:
+            return {"overall": "failed", "successful": False, "runs": [{"run_id": 201}]}
+
+    service = DevOpsService(
+        tmp_path,
+        docker,
+        gate_runner=gate,
+        github_actions=Actions(),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(DevOpsOperationError) as caught:
+        service.release("v1")
+
+    assert caught.value.code == "release_gate_failed"
+    assert "GitHub Actions 未通过" in str(caught.value)
+    assert docker.calls == []
+
+
 def test_unhealthy_release_is_audited_but_not_activated(tmp_path: Path) -> None:
     write_compose(tmp_path)
     runner = FakeDockerRunner()
@@ -565,3 +647,25 @@ def test_rollback_requires_one_time_plan_restores_images_and_audits_result(
     with pytest.raises(DevOpsOperationError) as caught:
         service.rollback(plan["plan_id"])
     assert caught.value.code == "rollback_plan_used"
+
+
+def test_worktree_can_share_release_history_and_environment_lock_identity(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    worktree = tmp_path / "isolated"
+    state_root = tmp_path / "state"
+    source.mkdir()
+    worktree.mkdir()
+    main = DevOpsService(source, release_state_root=state_root)
+    isolated = DevOpsService(
+        worktree,
+        release_state_root=state_root,
+        release_identity_workspace=source,
+    )
+
+    assert isolated.release_store.path == main.release_store.path
+    environment = isolated._load_config().environments["local"]
+    assert isolated._environment_identity(environment).startswith(
+        str(source.resolve()).casefold()
+    )

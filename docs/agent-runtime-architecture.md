@@ -24,6 +24,7 @@ HTTP 服务固定监听 `127.0.0.1`，浏览器负责项目、对话、审批、
 | `git_service.py` | 参数数组式 Git 查询和写操作 |
 | `git_tools.py` | Git Schema、参数验证和权限矩阵 |
 | `devops_service.py` | Docker Compose 项目识别、环境选择、命令执行和结果归一化 |
+| `worktree_service.py` | 从当前 HEAD 创建任务分支，并将项目子目录映射到独立 worktree |
 | `devops_tools.py` | DevOps Schema、参数验证、审批矩阵和结构化错误 |
 | `release_store.py` | 按工作区隔离的发布版本、回滚计划与审计事件原子存储 |
 | `changes.py` | 对话级文件快照和累计 Diff |
@@ -71,13 +72,20 @@ CodingAgent
 
 ## 工具组合与 Git
 
-`build_default_tool_provider()` 为有工作目录的对话组合三组工具：
+`build_default_tool_provider()` 为有工作目录的对话组合四组工具：
 
 - 文件与命令：浏览、读取、搜索、写入、精确替换和受控命令；
 - Git：status、diff、log、branches、create branch、stage、unstage、commit、pull 和 push。
+- GitHub Actions：按 Commit 查询状态、读取失败日志，以及人工确认后重跑失败任务；
 - DevOps：inspect、preflight、build、pull、deploy、status、logs、verify、restart、stop、版本发布和两阶段回滚。
 
 Git 命令使用参数数组和 `shell=False`。路径必须位于当前工作目录内；pull 固定使用 fast-forward-only；push 只使用已有上游或 `origin/当前分支`。hard reset、clean、force push 和删除远端引用不属于结构化能力，并由通用命令安全规则拒绝。
+
+GitHub Actions 控制面只调用本机 `gh` CLI，并依赖开发者预先完成的 `gh auth login`。状态查询按 Commit 获取每个 workflow 最新一次运行；失败日志有界并脱敏；远端重跑在任何权限模式下都创建人工审批。发布配置可以要求指定 workflow 全部成功，run ID 和 URL 会进入发布来源证据。
+
+网页右侧工作台复用 Diff 面板承载只读发布控制台。后端按当前对话的工作区重新解析 Compose 配置，汇总环境操作锁、容器状态、活动版本、Git/CI/镜像来源证据，并只返回经过裁剪的展示字段。页面中的历史版本操作只生成 Agent 回滚计划提示，不直接执行回滚，因此不会绕过一次性计划和人工审批边界。
+
+任务级 worktree 通过网页中的独立确认对话框显式创建。分支名只由内部任务 ID 派生，目标目录位于 Git 忽略的本机状态目录，Git 以固定参数数组执行；所选项目即使是仓库子目录，也会在新 worktree 中保持相同相对位置。会话保存来源项目与隔离路径，工具提供器和变更追踪器统一使用隔离路径。DevOps 读取隔离目录中的 Compose 与源码，但发布记录和环境锁仍使用来源项目作为身份，防止同一部署目标因 worktree 路径不同而并发执行。
 
 DevOps 控制面以 Docker Compose 为第一阶段目标。默认使用当前 Docker Context，也可从工作区内的 `coding-agent.toml` 选择预配置的远程 Context。Compose 文件必须位于工作区，环境、Context 和服务名称只接受安全字符；命令使用参数数组和 `shell=False`。部署先校验配置，再执行后台构建启动，等待容器 health 收敛后执行可选 HTTP 探针。日志限制行数并对常见 Token、密码和 URL 用户信息进行脱敏。
 

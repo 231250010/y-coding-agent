@@ -71,6 +71,12 @@ class WebTask:
     )
     pending_change_paths: list[str] = field(default_factory=list)
     review_path: str | None = None
+    worktree_path: Path | None = None
+    worktree_root: Path | None = None
+    worktree_branch: str | None = None
+    worktree_base_branch: str | None = None
+    worktree_base_commit: str | None = None
+    workspace_changing: bool = False
 
 
 ModelFactory = Callable[[], ChatModel]
@@ -195,6 +201,8 @@ class WebRuntime:
             project = self._project(project_id)
             if any(task.running and task.project_id == project.id for task in self.tasks):
                 raise RuntimeConflict("项目中仍有对话正在运行")
+            if any(task.worktree_path is not None and task.project_id == project.id for task in self.tasks):
+                raise RuntimeConflict("项目中仍有 worktree 隔离对话，请先保留分支并删除对应对话")
             self.projects.remove(project)
             for task in self.tasks:
                 if task.project_id == project.id:
@@ -207,6 +215,8 @@ class WebRuntime:
             task = self._task(task_id)
             if task.running:
                 raise RuntimeConflict("对话正在运行")
+            if task.workspace_changing:
+                raise RuntimeConflict("隔离工作区正在创建，暂时不能删除对话")
             self.tasks.remove(task)
             if self.current_id == task.id:
                 self.current_id = self.tasks[0].id if self.tasks else None
@@ -216,8 +226,10 @@ class WebRuntime:
         path = self._workspace_path(raw_path)
         with self.lock:
             task = self._task(task_id)
-            if task.running:
+            if task.running or task.workspace_changing:
                 raise RuntimeConflict("对话正在运行，不能更改工作目录")
+            if task.worktree_path is not None:
+                raise RuntimeConflict("当前对话已启用隔离 worktree，不能重新绑定工作目录")
             project = next((item for item in self.projects if item.path == path), None)
             created_project = project is None
             if project is None:
@@ -243,8 +255,65 @@ class WebRuntime:
     def ensure_workspace_change_allowed(self, task_id: str) -> None:
         with self.lock:
             task = self._task(task_id)
-            if task.running:
+            if task.running or task.workspace_changing:
                 raise RuntimeConflict("对话正在运行，不能更改工作目录")
+            if task.worktree_path is not None:
+                raise RuntimeConflict("当前对话已启用隔离 worktree，不能重新绑定工作目录")
+
+    def create_task_worktree(self, task_id: str) -> dict[str, Any]:
+        from .worktree_service import WorktreeOperationError, WorktreeService
+
+        with self.lock:
+            task = self._task(task_id)
+            project = self._project(task.project_id) if task.project_id else None
+            if project is None:
+                raise RuntimeConflict("请先为当前对话选择 Git 工作目录")
+            if task.running or task.workspace_changing:
+                raise RuntimeConflict("对话正在运行，不能创建隔离工作区")
+            if task.worktree_path is not None:
+                return self._task_payload(task)
+            if task.change_tracker.changes:
+                raise RuntimeConflict("当前对话已经产生文件改动，请新建对话后再启用 worktree 隔离")
+            task.workspace_changing = True
+            task.status = "正在创建隔离工作区"
+
+        try:
+            binding = WorktreeService(
+                project.path,
+                self.settings_root / ".coding-agent" / "worktrees",
+            ).create(task.id)
+            with self.lock:
+                task = self._task(task_id)
+                task.worktree_path = Path(binding["workspace"]).resolve()
+                task.worktree_root = Path(binding["worktree_root"]).resolve()
+                task.worktree_branch = str(binding["branch"])
+                task.worktree_base_branch = (
+                    str(binding["base_branch"]) if binding["base_branch"] else None
+                )
+                task.worktree_base_commit = str(binding["base_commit"])
+                task.change_tracker.retarget(task.worktree_path)
+                task.workspace_changing = False
+                task.status = "隔离工作区已就绪"
+                task.entries.append(
+                    ChatEntry(
+                        "system",
+                        f"已为当前对话创建隔离分支 {task.worktree_branch}。"
+                        "Agent、Diff 与 DevOps 操作只作用于该 worktree；主工作区不会自动合并。",
+                    )
+                )
+                self._save()
+                return self._task_payload(task)
+        except Exception as exc:
+            with self.lock:
+                try:
+                    task = self._task(task_id)
+                except RuntimeNotFound:
+                    raise
+                task.workspace_changing = False
+                task.status = "隔离工作区创建失败"
+            if isinstance(exc, WorktreeOperationError):
+                raise RuntimeConflict(str(exc)) from exc
+            raise
 
     def select_conversation(self, task_id: str) -> None:
         with self.lock:
@@ -287,6 +356,8 @@ class WebRuntime:
             task = self._task(task_id)
             if task.running:
                 raise RuntimeConflict("当前对话正在运行")
+            if task.workspace_changing:
+                raise RuntimeConflict("隔离工作区正在创建，请稍后再发送任务")
             task.entries.append(ChatEntry("user", message))
             if not task.title_is_custom and task.title == "新对话":
                 task.title = self._display_name(message)[:36]
@@ -385,6 +456,128 @@ class WebRuntime:
                 "rows": rows,
             }
 
+    def devops_overview(self, task_id: str) -> dict[str, Any]:
+        with self.lock:
+            task = self._task(task_id)
+            project = next(
+                (item for item in self.projects if item.id == task.project_id), None
+            )
+            if project is None:
+                raise RuntimeConflict("当前对话尚未选择工作目录")
+            workspace = self._task_workspace(task, project)
+
+        from .devops_service import DevOpsOperationError, DevOpsService
+
+        service = DevOpsService(
+            workspace,
+            release_state_root=self.settings_root / ".coding-agent" / "releases",
+            release_identity_workspace=project.path,
+        )
+        inspected = service.inspect()
+        environments: list[dict[str, Any]] = []
+        for configured in inspected["environments"]:
+            name = configured["name"]
+            item: dict[str, Any] = {
+                **configured,
+                "active_version": None,
+                "services": [],
+                "releases": [],
+                "rollback_events": [],
+                "operation": {"environment": name, "busy": False, "owner": None},
+                "error": None,
+            }
+            if not inspected["ready"]:
+                item["error"] = {
+                    "code": "compose_not_found",
+                    "message": "项目中未找到 Docker Compose 配置",
+                }
+                environments.append(item)
+                continue
+            try:
+                operation = service.operation_status(name)
+                history = service.releases(name, limit=20)
+                status = service.status(name)
+                item.update(
+                    {
+                        "operation": operation,
+                        "active_version": history["active_version"],
+                        "services": [
+                            self._service_status_summary(record)
+                            for record in status["services"]
+                        ],
+                        "releases": [
+                            self._release_summary(record)
+                            for record in history["releases"]
+                        ],
+                        "rollback_events": [
+                            self._rollback_event_summary(record)
+                            for record in history["rollback_events"]
+                        ],
+                    }
+                )
+            except DevOpsOperationError as exc:
+                item["error"] = {"code": exc.code, "message": str(exc)}
+            environments.append(item)
+        return {
+            "workspace": str(workspace),
+            "compose_file": inspected["compose_file"],
+            "default_environment": inspected["default_environment"],
+            "release_policy": inspected["release_policy"],
+            "github_actions": inspected["github_actions"],
+            "environments": environments,
+        }
+
+    @staticmethod
+    def _service_status_summary(record: dict[str, Any]) -> dict[str, str]:
+        return {
+            "service": str(
+                record.get("Service") or record.get("service") or record.get("Name") or "unknown"
+            )[:120],
+            "state": str(record.get("State") or record.get("state") or "unknown")[:40],
+            "health": str(record.get("Health") or record.get("health") or "not-configured")[:40],
+        }
+
+    @staticmethod
+    def _release_summary(record: dict[str, Any]) -> dict[str, Any]:
+        provenance = record.get("provenance") if isinstance(record.get("provenance"), dict) else {}
+        git = provenance.get("git") if isinstance(provenance.get("git"), dict) else {}
+        actions = (
+            provenance.get("github_actions")
+            if isinstance(provenance.get("github_actions"), dict)
+            else {}
+        )
+        return {
+            "version": str(record.get("version") or ""),
+            "status": str(record.get("status") or "unknown"),
+            "created_at": str(record.get("created_at") or ""),
+            "healthy": bool(record.get("healthy")),
+            "services": [str(item) for item in record.get("services", []) if isinstance(item, str)],
+            "images": [
+                {
+                    "reference": str(item.get("reference") or ""),
+                    "id": str(item.get("id") or "")[:24],
+                }
+                for item in record.get("images", [])
+                if isinstance(item, dict)
+            ],
+            "git": {
+                "commit": git.get("commit"),
+                "branch": git.get("branch"),
+                "dirty": git.get("dirty"),
+            },
+            "github_actions": actions,
+        }
+
+    @staticmethod
+    def _rollback_event_summary(record: dict[str, Any]) -> dict[str, str]:
+        return {
+            "from_version": str(record.get("from_version") or ""),
+            "target_version": str(record.get("target_version") or ""),
+            "status": str(record.get("status") or "unknown")[:40],
+            "started_at": str(record.get("started_at") or ""),
+            "finished_at": str(record.get("finished_at") or ""),
+        }
+
     def update_settings(self, values: dict[str, Any]) -> dict[str, Any]:
         allowed = {"api_key", "model", "base_url", "context_tokens", "max_steps", "approval_mode", "remember_key"}
         unknown = set(values) - allowed
@@ -475,7 +668,7 @@ class WebRuntime:
 
     def _make_agent(self, task: WebTask) -> CodingAgent:
         project = self._project(task.project_id) if task.project_id else None
-        workspace = project.path if project else None
+        workspace = self._task_workspace(task, project)
         # Config validates model settings and requires a directory. The settings
         # root is used only for that validation in projectless chat; the tool
         # provider still receives None, so local tools cannot fall back here.
@@ -505,6 +698,7 @@ class WebRuntime:
                 task.id, "tool_progress", data
             ),
             devops_state_root=self.settings_root / ".coding-agent" / "releases",
+            devops_release_identity_workspace=project.path if project else None,
             approval_mode=task.permission_mode,
             change_tracker=task.change_tracker,
         )
@@ -615,7 +809,15 @@ class WebRuntime:
                 continue
             project_id = raw.get("project_id") if isinstance(raw.get("project_id"), str) else None
             project = projects.get(project_id)
-            tracker = ConversationChangeTracker(project.path if project else None)
+            stored_worktree = raw.get("worktree") if isinstance(raw.get("worktree"), dict) else {}
+            worktree_path = self._stored_directory(stored_worktree.get("workspace"))
+            worktree_root = self._stored_directory(stored_worktree.get("root"))
+            if worktree_path is None or worktree_root is None:
+                worktree_path = None
+                worktree_root = None
+            tracker = ConversationChangeTracker(
+                worktree_path or (project.path if project else None)
+            )
             tracker.load_serialized(raw.get("file_changes", []))
             entries = self._entries_from_storage(raw.get("entries"))
             pending = self._collapse_legacy_changes(entries)
@@ -646,7 +848,28 @@ class WebRuntime:
                 history=list(history) if isinstance(history, list) else [],
                 change_tracker=tracker,
                 review_path=raw.get("review_path") if isinstance(raw.get("review_path"), str) else None,
+                worktree_path=worktree_path,
+                worktree_root=worktree_root,
+                worktree_branch=(
+                    str(stored_worktree["branch"])
+                    if isinstance(stored_worktree.get("branch"), str)
+                    else None
+                ),
+                worktree_base_branch=(
+                    str(stored_worktree["base_branch"])
+                    if isinstance(stored_worktree.get("base_branch"), str)
+                    else None
+                ),
+                worktree_base_commit=(
+                    str(stored_worktree["base_commit"])
+                    if isinstance(stored_worktree.get("base_commit"), str)
+                    else None
+                ),
             )
+            if stored_worktree and worktree_path is None:
+                task.entries.append(
+                    ChatEntry("system", "保存的隔离 worktree 已不存在，当前对话已回退到项目工作区。")
+                )
             self.tasks.append(task)
         current_id = state.get("current_id")
         if isinstance(current_id, str) and any(task.id == current_id for task in self.tasks):
@@ -655,7 +878,7 @@ class WebRuntime:
     def _save(self) -> None:
         self.store.save(
             {
-                "version": 3,
+                "version": 4,
                 "current_id": self.current_id,
                 "projects": [self._project_payload(project) for project in self.projects],
                 "tasks": [
@@ -673,6 +896,7 @@ class WebRuntime:
                         "file_changes": task.change_tracker.serialize(),
                         "review_path": task.review_path,
                         "pending_change_paths": list(task.pending_change_paths),
+                        "worktree": self._worktree_payload(task),
                     }
                     for task in self.tasks
                 ],
@@ -710,6 +934,7 @@ class WebRuntime:
 
     def _task_payload(self, task: WebTask) -> dict[str, Any]:
         project = next((item for item in self.projects if item.id == task.project_id), None)
+        workspace = self._task_workspace(task, project)
         return {
             "id": task.id,
             "project_id": task.project_id,
@@ -718,12 +943,40 @@ class WebRuntime:
             "running": task.running,
             "status": task.status,
             "progress": task.progress,
-            "workspace": str(project.path) if project else None,
+            "workspace": str(workspace) if workspace else None,
+            "source_workspace": str(project.path) if project else None,
+            "worktree": self._worktree_payload(task),
+            "workspace_changing": task.workspace_changing,
             "entries": [
                 {"kind": entry.kind, "text": entry.text, "change_paths": list(entry.change_paths)}
                 for entry in task.entries
             ],
             "review_path": task.review_path,
+        }
+
+    @staticmethod
+    def _stored_directory(value: Any) -> Path | None:
+        if not isinstance(value, str) or not value:
+            return None
+        path = Path(value).expanduser().resolve()
+        return path if path.is_dir() else None
+
+    @staticmethod
+    def _task_workspace(task: WebTask, project: WebProject | None) -> Path | None:
+        if task.worktree_path is not None and task.worktree_path.is_dir():
+            return task.worktree_path
+        return project.path if project else None
+
+    @staticmethod
+    def _worktree_payload(task: WebTask) -> dict[str, Any] | None:
+        if task.worktree_path is None or task.worktree_root is None:
+            return None
+        return {
+            "workspace": str(task.worktree_path),
+            "root": str(task.worktree_root),
+            "branch": task.worktree_branch,
+            "base_branch": task.worktree_base_branch,
+            "base_commit": task.worktree_base_commit,
         }
 
     @staticmethod

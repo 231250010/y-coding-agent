@@ -210,8 +210,7 @@ class ReleaseStore:
     def environment_lock(
         self, identity: str, operation: str, environment: str
     ) -> InterProcessFileLock:
-        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
-        path = self.path.parent / ".locks" / f"{self.path.stem}-{digest}.lock"
+        path = self.environment_lock_path(identity)
         return InterProcessFileLock(
             path,
             {
@@ -221,3 +220,18 @@ class ReleaseStore:
                 "workspace": str(self.workspace),
             },
         )
+
+    def environment_lock_path(self, identity: str) -> Path:
+        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+        return self.path.parent / ".locks" / f"{self.path.stem}-{digest}.lock"
+
+    def environment_owner(self, identity: str) -> dict[str, Any]:
+        path = self.environment_lock_path(identity)
+        try:
+            with InterProcessFileLock(
+                path,
+                {"kind": "lock_probe", "workspace": str(self.workspace)},
+            ):
+                return {}
+        except ReleaseLockBusy as exc:
+            return exc.metadata

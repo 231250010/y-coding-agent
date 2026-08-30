@@ -20,6 +20,7 @@ from urllib import error as urlerror
 from urllib import request as urlrequest
 
 from .release_store import ReleaseLockBusy, ReleaseStore
+from .github_actions_service import GitHubActionsError, GitHubActionsService
 from .safety import CommandPolicy, RiskLevel
 
 
@@ -70,11 +71,18 @@ class ReleasePolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class GitHubActionsPolicy:
+    require_success: bool = False
+    workflows: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class DevOpsProjectConfig:
     compose_file: Path | None
     default_environment: str
     environments: dict[str, DevOpsEnvironment]
     release_policy: ReleasePolicy
+    github_actions: GitHubActionsPolicy
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,14 +110,26 @@ class DevOpsService:
         is_cancelled: CancelCallback | None = None,
         on_progress: ProgressCallback | None = None,
         release_state_root: Path | None = None,
+        release_identity_workspace: Path | None = None,
         gate_runner: GateRunner | None = None,
+        github_actions: GitHubActionsService | None = None,
     ) -> None:
         self.workspace = workspace.resolve()
         self._runner = runner
         self.is_cancelled = is_cancelled or (lambda: False)
         self.on_progress = on_progress or (lambda _data: None)
-        self.release_store = ReleaseStore(self.workspace, release_state_root)
+        self.release_identity_workspace = (
+            release_identity_workspace.resolve()
+            if release_identity_workspace is not None
+            else self.workspace
+        )
+        self.release_store = ReleaseStore(
+            self.release_identity_workspace, release_state_root
+        )
         self._gate_runner = gate_runner
+        self.github_actions = github_actions or GitHubActionsService(
+            self.workspace, is_cancelled=self.is_cancelled
+        )
 
     def inspect(self) -> dict[str, Any]:
         config = self._load_config()
@@ -145,6 +165,10 @@ class DevOpsService:
                 "require_git": config.release_policy.require_git,
                 "require_clean_worktree": config.release_policy.require_clean_worktree,
                 "checks": [check.name for check in config.release_policy.checks],
+            },
+            "github_actions": {
+                "require_success": config.github_actions.require_success,
+                "workflows": list(config.github_actions.workflows),
             },
             "ready": config.compose_file is not None,
         }
@@ -193,6 +217,17 @@ class DevOpsService:
         return {
             "environment": selected.name,
             "services": services,
+        }
+
+    def operation_status(self, environment: str | None = None) -> dict[str, Any]:
+        _config, selected = self._resolve_environment(environment)
+        owner = self.release_store.environment_owner(
+            self._environment_identity(selected)
+        )
+        return {
+            "environment": selected.name,
+            "busy": bool(owner),
+            "owner": owner or None,
         }
 
     def logs(
@@ -429,6 +464,10 @@ class DevOpsService:
             "require_git": policy.require_git,
             "require_clean_worktree": policy.require_clean_worktree,
             "checks": checks,
+            "github_actions": {
+                "require_success": config.github_actions.require_success,
+                "workflows": list(config.github_actions.workflows),
+            },
             "policy_digest": self._policy_digest(),
         }
 
@@ -820,6 +859,30 @@ class DevOpsService:
             if not item["passed"]:
                 failures.append(f"发布检查未通过: {check.name}")
 
+        evidence["github_actions"] = {
+            "required": config.github_actions.require_success,
+            "workflows": list(config.github_actions.workflows),
+            "status": None,
+        }
+        if config.github_actions.require_success:
+            try:
+                actions_status = self.github_actions.status(
+                    git_evidence.get("commit"),
+                    workflows=config.github_actions.workflows,
+                )
+                evidence["github_actions"]["status"] = actions_status
+                if not actions_status["successful"]:
+                    failures.append(
+                        f"GitHub Actions 未通过: {actions_status['overall']}"
+                    )
+            except GitHubActionsError as exc:
+                evidence["github_actions"]["error"] = {
+                    "code": exc.code,
+                    "message": str(exc),
+                    "output": exc.output[:2000],
+                }
+                failures.append(f"GitHub Actions 无法验证: {exc.code}")
+
         evidence["passed"] = not failures
         evidence["failures"] = failures
         if failures:
@@ -1060,13 +1123,7 @@ class DevOpsService:
     def _environment_operation(
         self, selected: DevOpsEnvironment, operation: str
     ) -> Any:
-        key = "|".join(
-            (
-                str(self.workspace).casefold(),
-                (selected.docker_context or "current").casefold(),
-                selected.name.casefold(),
-            )
-        )
+        key = self._environment_identity(selected)
         with self._locks_guard:
             lock = self._environment_locks.setdefault(key, threading.Lock())
             active = self._active_operations.get(key)
@@ -1098,6 +1155,15 @@ class DevOpsService:
             with self._locks_guard:
                 self._active_operations.pop(key, None)
                 lock.release()
+
+    def _environment_identity(self, selected: DevOpsEnvironment) -> str:
+        return "|".join(
+            (
+                str(self.release_identity_workspace).casefold(),
+                (selected.docker_context or "current").casefold(),
+                selected.name.casefold(),
+            )
+        )
 
     @contextmanager
     def _release_transaction(
@@ -1223,9 +1289,39 @@ class DevOpsService:
         if not isinstance(default_environment, str) or default_environment not in environments:
             raise DevOpsOperationError("config_invalid", "默认环境未在 devops.environments 中定义")
         release_policy = self._parse_release_policy(raw.get("release", {}))
-        return DevOpsProjectConfig(
-            compose_file, default_environment, environments, release_policy
+        github_actions = self._parse_github_actions_policy(
+            raw.get("github_actions", {})
         )
+        return DevOpsProjectConfig(
+            compose_file,
+            default_environment,
+            environments,
+            release_policy,
+            github_actions,
+        )
+
+    def _parse_github_actions_policy(self, value: Any) -> GitHubActionsPolicy:
+        if not isinstance(value, dict):
+            raise DevOpsOperationError(
+                "config_invalid", "devops.github_actions 必须是 TOML 表"
+            )
+        require_success = self._config_bool(
+            value.get("require_success", False),
+            "github_actions.require_success",
+        )
+        raw_workflows = value.get("workflows", [])
+        if (
+            not isinstance(raw_workflows, list)
+            or len(raw_workflows) > 30
+            or any(
+                not isinstance(item, str) or not item or len(item) > 200
+                for item in raw_workflows
+            )
+        ):
+            raise DevOpsOperationError(
+                "config_invalid", "github_actions.workflows 必须是非空名称数组"
+            )
+        return GitHubActionsPolicy(require_success, tuple(raw_workflows))
 
     def _parse_http_probes(self, environment: str, value: Any) -> tuple[HttpProbe, ...]:
         if not isinstance(value, list) or len(value) > 20:

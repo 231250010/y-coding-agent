@@ -51,6 +51,9 @@ def test_default_provider_adds_git_and_devops_tools_for_selected_workspace(tmp_p
     assert names[:2] == ["list_files", "read_file"]
     assert "git_status" in names
     assert "git_push" in names
+    assert "github_actions_status" in names
+    assert "github_actions_failed_logs" in names
+    assert "github_actions_rerun_failed" in names
     assert "devops_inspect" in names
     assert "compose_deploy" in names
     assert "compose_verify" in names

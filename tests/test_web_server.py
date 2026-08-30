@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import subprocess
 import threading
 from contextlib import contextmanager
 from pathlib import Path
@@ -105,6 +106,87 @@ def test_conversation_can_be_created_selected_and_bound(tmp_path: Path) -> None:
     assert bind_status == 200
     assert json.loads(bind_raw)["task"]["workspace"] == str(workspace.resolve())
     assert select_status == 204
+
+
+def test_devops_overview_route_is_safe_when_project_has_no_compose_file(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    with running_server(tmp_path) as (_runtime, port):
+        _, _, task_raw = request(port, "POST", "/api/conversations", {})
+        task = json.loads(task_raw)["task"]
+        request(
+            port,
+            "POST",
+            f"/api/conversations/{task['id']}/workspace",
+            {"path": str(workspace)},
+        )
+        status, content_type, raw = request(
+            port,
+            "GET",
+            f"/api/conversations/{task['id']}/devops-overview",
+        )
+
+    payload = json.loads(raw)["overview"]
+    assert status == 200
+    assert content_type.startswith("application/json")
+    assert payload["workspace"] == str(workspace.resolve())
+    assert payload["compose_file"] is None
+    assert payload["environments"][0]["error"]["code"] == "compose_not_found"
+    assert "unit-test-secret" not in json.dumps(payload)
+
+
+def test_task_worktree_route_switches_only_that_conversation_workspace(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repository"
+    workspace.mkdir()
+    subprocess.run(["git", "init"], cwd=workspace, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "tests@example.invalid"],
+        cwd=workspace,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Coding Agent Tests"],
+        cwd=workspace,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "commit.gpgsign", "false"],
+        cwd=workspace,
+        check=True,
+    )
+    (workspace / "app.txt").write_text("main\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app.txt"], cwd=workspace, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=workspace, check=True)
+
+    with running_server(tmp_path) as (_runtime, port):
+        _, _, project_raw = request(port, "POST", "/api/projects", {"path": str(workspace)})
+        project = json.loads(project_raw)["project"]
+        _, _, first_raw = request(
+            port, "POST", "/api/conversations", {"project_id": project["id"]}
+        )
+        _, _, second_raw = request(
+            port, "POST", "/api/conversations", {"project_id": project["id"]}
+        )
+        first = json.loads(first_raw)["task"]
+        second = json.loads(second_raw)["task"]
+        status, _, isolated_raw = request(
+            port, "POST", f"/api/conversations/{first['id']}/worktree", {}
+        )
+        _, _, state_raw = request(port, "GET", "/api/state")
+
+    isolated = json.loads(isolated_raw)["task"]
+    state = json.loads(state_raw)
+    untouched = next(item for item in state["tasks"] if item["id"] == second["id"])
+    assert status == 201
+    assert isolated["worktree"]["branch"].startswith("coding-agent/task-")
+    assert isolated["workspace"] != str(workspace.resolve())
+    assert Path(isolated["workspace"]).joinpath("app.txt").is_file()
+    assert untouched["workspace"] == str(workspace.resolve())
+    assert untouched["worktree"] is None
 
 
 def test_conversation_permission_mode_route_updates_only_selected_task(tmp_path: Path) -> None:

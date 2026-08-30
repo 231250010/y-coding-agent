@@ -17,6 +17,15 @@ const ui = {
   connection: document.querySelector("#connection-label"), diffPanel: document.querySelector("#diff-panel"),
   diffPath: document.querySelector("#diff-path"), diffCounts: document.querySelector("#diff-counts"),
   diffWarning: document.querySelector("#diff-warning"), diffContent: document.querySelector("#diff-content"),
+  diffView: document.querySelector("#diff-view"), operationsView: document.querySelector("#operations-view"),
+  operationsContent: document.querySelector("#operations-content"),
+  refreshOperations: document.querySelector("#refresh-operations"),
+  worktreeButton: document.querySelector("#create-worktree"),
+  worktreeDialog: document.querySelector("#worktree-dialog"),
+  worktreeForm: document.querySelector("#worktree-form"),
+  worktreeSource: document.querySelector("#worktree-source"),
+  worktreeBranchPreview: document.querySelector("#worktree-branch-preview"),
+  confirmWorktree: document.querySelector("#confirm-worktree"),
   workspaceDialog: document.querySelector("#workspace-dialog"), workspaceForm: document.querySelector("#workspace-form"),
   workspacePath: document.querySelector("#workspace-path"), workspaceTitle: document.querySelector("#workspace-dialog-title"),
   browseWorkspace: document.querySelector("#browse-workspace"),
@@ -307,6 +316,7 @@ function renderConversation() {
     ui.workspace.disabled = false; ui.composerWorkspace.disabled = false;
     ui.permissionMode.value = state.settings.approval_mode || "risk";
     ui.permissionMode.disabled = true;
+    ui.worktreeButton.hidden = true;
     return;
   }
   ui.title.textContent = task.title;
@@ -319,6 +329,13 @@ function renderConversation() {
   ui.composerWorkspace.disabled = task.running;
   ui.permissionMode.value = task.permission_mode || state.settings.approval_mode || "risk";
   ui.permissionMode.disabled = task.running;
+  ui.worktreeButton.hidden = !task.project_id;
+  ui.worktreeButton.disabled = task.running || task.workspace_changing || Boolean(task.worktree);
+  ui.worktreeButton.classList.toggle("active", Boolean(task.worktree));
+  ui.worktreeButton.lastChild.textContent = task.worktree ? ` ${task.worktree.branch}` : " 隔离";
+  ui.worktreeButton.title = task.worktree
+    ? `已隔离到 ${task.worktree.workspace}，主工作区不会自动合并`
+    : "为当前对话创建独立 Git worktree";
   ui.stop.hidden = !task.running;
   renderProgress(task);
   ui.empty.hidden = task.entries.length > 0;
@@ -480,6 +497,7 @@ async function openDiff(path) {
     ui.diffCounts.replaceChildren(element("b", "", `+${change.added}`), element("i", "", `−${change.deleted}`));
     ui.diffWarning.hidden = !change.warning; ui.diffWarning.textContent = change.warning || "";
     ui.diffContent.replaceChildren(...change.rows.map(diffRow));
+    ui.diffView.hidden = false; ui.operationsView.hidden = true;
     ui.shell.classList.add("diff-open"); ui.diffPanel.setAttribute("aria-hidden", "false");
   } catch (error) { toast(error.message); }
 }
@@ -494,6 +512,163 @@ function diffRow(row) {
 }
 
 function closeDiff() { ui.shell.classList.remove("diff-open"); ui.diffPanel.setAttribute("aria-hidden", "true"); }
+
+function shortCommit(value) { return value ? String(value).slice(0, 8) : "未记录"; }
+
+function displayTime(value) {
+  if (!value) return "时间未知";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function fillTaskPrompt(text) {
+  ui.input.value = text;
+  closeDiff();
+  ui.input.focus();
+}
+
+function statusTone(value) {
+  const normalized = String(value || "").toLowerCase();
+  if (["success", "healthy", "running", "released", "rolled_back"].includes(normalized)) return "good";
+  if (["failed", "failure", "unhealthy", "dead", "exited"].includes(normalized)) return "bad";
+  return "pending";
+}
+
+function releaseNode(release, activeVersion, environment) {
+  const row = element("article", `release-entry ${release.version === activeVersion ? "active" : ""}`);
+  const marker = element("span", `release-marker ${statusTone(release.status)}`);
+  const body = element("div", "release-entry-body");
+  const top = element("div", "release-entry-top");
+  top.append(element("strong", "release-version", release.version || "未命名版本"));
+  if (release.version === activeVersion) top.append(element("span", "active-badge", "当前运行"));
+  top.append(element("time", "release-time", displayTime(release.created_at)));
+  const meta = element("div", "release-meta");
+  meta.append(
+    element("span", "", release.git && release.git.branch ? release.git.branch : "无分支"),
+    element("code", "", shortCommit(release.git && release.git.commit)),
+    element("span", `release-health ${release.healthy ? "good" : "bad"}`, release.healthy ? "健康" : "未通过"),
+  );
+  const actionsEvidence = release.github_actions && release.github_actions.status;
+  if (actionsEvidence) meta.append(element("span", `ci-chip ${statusTone(actionsEvidence.overall)}`, `CI ${actionsEvidence.overall}`));
+  body.append(top, meta);
+  if (release.images && release.images.length) {
+    const images = element("div", "release-images");
+    release.images.forEach((image) => images.append(element("code", "", `${image.reference} · ${image.id}`)));
+    body.append(images);
+  }
+  if (release.version && release.version !== activeVersion && release.status === "released") {
+    const rollback = element("button", "rollback-prompt", "生成回滚计划");
+    rollback.type = "button";
+    rollback.addEventListener("click", () => fillTaskPrompt(`查询 ${environment} 的发布历史，并为版本 ${release.version} 生成回滚计划。先展示影响，不要直接执行回滚。`));
+    body.append(rollback);
+  }
+  row.append(marker, body);
+  return row;
+}
+
+function environmentNode(environment) {
+  const card = element("section", "environment-card");
+  const head = element("header", "environment-card-head");
+  const identity = element("div", "environment-identity");
+  identity.append(element("span", "environment-context", environment.docker_context || "current"), element("h3", "", environment.name));
+  const live = environment.operation && environment.operation.busy;
+  head.append(identity, element("span", `environment-lock ${live ? "busy" : "free"}`, live ? "操作进行中" : "环境空闲"));
+  card.append(head);
+
+  if (environment.error) {
+    const error = element("div", "operations-error");
+    error.append(element("strong", "", environment.error.code), element("p", "", environment.error.message));
+    const diagnose = element("button", "quiet-button compact", "让 Agent 诊断");
+    diagnose.type = "button";
+    diagnose.addEventListener("click", () => fillTaskPrompt(`诊断 ${environment.name} 环境：${environment.error.message}`));
+    error.append(diagnose); card.append(error); return card;
+  }
+
+  const summary = element("div", "environment-summary");
+  const version = element("div", "environment-version");
+  version.append(element("small", "", "ACTIVE VERSION"), element("strong", "", environment.active_version || "尚未发布"));
+  const services = element("div", "service-strip");
+  if (!environment.services.length) services.append(element("span", "service-empty", "没有运行中的服务"));
+  environment.services.forEach((service) => {
+    const chip = element("span", `service-chip ${statusTone(service.health === "healthy" ? "healthy" : service.state)}`);
+    chip.append(element("i", ""), document.createTextNode(`${service.service} · ${service.health || service.state}`));
+    services.append(chip);
+  });
+  summary.append(version, services); card.append(summary);
+
+  const rail = element("div", "release-rail");
+  if (!environment.releases.length) {
+    const empty = element("div", "release-empty");
+    empty.append(element("strong", "", "还没有版本记录"), element("p", "", "使用 compose_release 后，版本、Commit、CI 和镜像证据会出现在这里。"));
+    rail.append(empty);
+  } else {
+    environment.releases.forEach((release) => rail.append(releaseNode(release, environment.active_version, environment.name)));
+  }
+  card.append(rail);
+  return card;
+}
+
+function renderOperations(overview) {
+  ui.operationsContent.replaceChildren();
+  const manifest = element("section", "operations-manifest");
+  const copy = element("div", "operations-manifest-copy");
+  copy.append(element("span", "operations-eyebrow", overview.compose_file ? "COMPOSE CONNECTED" : "COMPOSE NOT FOUND"));
+  copy.append(element("strong", "", overview.compose_file || "选择包含 Compose 配置的项目"));
+  copy.append(element("p", "", overview.workspace));
+  const gate = element("div", "operations-gate");
+  gate.append(element("small", "", "RELEASE GATE"));
+  const gateParts = [];
+  if (overview.release_policy.require_clean_worktree) gateParts.push("Git clean");
+  if (overview.release_policy.checks.length) gateParts.push(`${overview.release_policy.checks.length} checks`);
+  if (overview.github_actions.require_success) gateParts.push("CI required");
+  gate.append(element("strong", "", gateParts.join(" · ") || "基础门禁"));
+  manifest.append(copy, gate); ui.operationsContent.append(manifest);
+  overview.environments.forEach((environment) => ui.operationsContent.append(environmentNode(environment)));
+}
+
+async function openOperations() {
+  const task = currentTask();
+  if (!task || !task.workspace) { toast("请先为当前对话选择工作目录"); return; }
+  ui.diffView.hidden = true; ui.operationsView.hidden = false;
+  ui.shell.classList.add("diff-open"); ui.diffPanel.setAttribute("aria-hidden", "false");
+  ui.operationsContent.replaceChildren(element("div", "operations-loading", "正在读取环境、容器和发布证据…"));
+  ui.refreshOperations.disabled = true;
+  try {
+    const data = await api(`/api/conversations/${task.id}/devops-overview`);
+    renderOperations(data.overview);
+  } catch (error) {
+    const failure = element("div", "operations-error prominent");
+    failure.append(element("strong", "", "发布台无法加载"), element("p", "", error.message));
+    ui.operationsContent.replaceChildren(failure);
+  } finally { ui.refreshOperations.disabled = false; }
+}
+
+function openWorktreeDialog() {
+  const task = currentTask();
+  if (!task || !task.workspace) { toast("请先为当前对话选择 Git 工作目录"); return; }
+  if (task.worktree) { toast(`当前对话已隔离到 ${task.worktree.branch}`); return; }
+  ui.worktreeSource.textContent = task.source_workspace || task.workspace;
+  ui.worktreeBranchPreview.textContent = `coding-agent/task-${task.id.slice(0, 12).toLowerCase()}`;
+  ui.worktreeDialog.showModal();
+}
+
+async function createTaskWorktree(event) {
+  event.preventDefault();
+  const task = currentTask();
+  if (!task) return;
+  ui.confirmWorktree.disabled = true;
+  ui.confirmWorktree.textContent = "正在创建…";
+  try {
+    await api(`/api/conversations/${task.id}/worktree`, { method: "POST", body: {} });
+    ui.worktreeDialog.close();
+    await refresh(false);
+    toast("隔离工作区已创建，后续操作不会改动主工作区");
+  } catch (error) { toast(error.message); }
+  finally {
+    ui.confirmWorktree.disabled = false;
+    ui.confirmWorktree.textContent = "创建隔离工作区";
+  }
+}
 function openRename(kind, id, title) {
   renameTarget = { kind, id }; ui.renameValue.value = title; ui.renameDialog.showModal(); ui.renameValue.select();
 }
@@ -629,6 +804,10 @@ document.querySelector("#rename-current").addEventListener("click", (event) => {
   if (task) openItemMenu("task", task.id, task.title, event.currentTarget);
 });
 document.querySelector("#close-diff").addEventListener("click", closeDiff);
+document.querySelector("#open-operations").addEventListener("click", openOperations);
+document.querySelector("#create-worktree").addEventListener("click", openWorktreeDialog);
+document.querySelector("#close-operations").addEventListener("click", closeDiff);
+document.querySelector("#refresh-operations").addEventListener("click", openOperations);
 document.querySelector("#open-sidebar").addEventListener("click", openSidebar);
 document.querySelector("#close-sidebar").addEventListener("click", closeSidebar);
 document.querySelector("#sidebar-scrim").addEventListener("click", closeSidebar);
@@ -637,6 +816,7 @@ document.querySelector("#cancel-operation").addEventListener("click", stopTask);
 document.querySelector("#approve-command").addEventListener("click", () => resolveApproval(true));
 document.querySelector("#deny-command").addEventListener("click", () => resolveApproval(false));
 ui.workspaceForm.addEventListener("submit", submitWorkspace);
+ui.worktreeForm.addEventListener("submit", createTaskWorktree);
 ui.browseWorkspace.addEventListener("click", browseWorkspace);
 ui.composer.addEventListener("submit", sendMessage);
 ui.renameForm.addEventListener("submit", submitRename);

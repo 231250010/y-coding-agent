@@ -52,6 +52,8 @@
 - `model.py`：`openai` 基础客户端的薄适配层，不包含 Agent 逻辑。
 - `tools.py`：工具 Schema、参数校验和六个本地工具。
 - `git_service.py` / `git_tools.py`：结构化 Git 控制面和审批规则。
+- `worktree_service.py`：为网页对话创建任务级 Git 分支和隔离工作区。
+- `github_actions_service.py` / `github_actions_tools.py`：基于本机 `gh` CLI 的 CI 状态、失败日志和重跑控制面。
 - `devops_service.py` / `devops_tools.py`：结构化 Docker Compose 控制面、环境配置和审批规则。
 - `safety.py`：命令风险分类。
 - `context.py`：token 粗略估算、完整轮次摘要和保守裁剪。
@@ -70,6 +72,8 @@ python -m venv .venv
 .venv\Scripts\Activate.ps1
 python -m pip install -e ".[dev]"
 ```
+
+如需 GitHub Actions 集成，另行安装 [GitHub CLI](https://cli.github.com/) 并执行一次 `gh auth login`。Coding Agent 复用 `gh` 的本机认证，不读取、保存或返回 GitHub Token。
 
 macOS 或 Linux：
 
@@ -126,11 +130,13 @@ python -m coding_agent --no-browser
 - 中间交互区：展示用户消息、模型答复、工具进度和输入框。
 - 工作目录：可调用本机目录选择器，也可输入绝对路径；不同对话可以绑定不同目录。
 - 文件改动：每轮任务结束后只显示一次“本轮改动”，不会为每次工具调用重复生成入口。
-- 右侧 Diff：点击改动文件后展开，显示 `+/-` 行数、旧/新行号和颜色高亮。
+- 右侧工作台：点击改动文件进入 Diff；点击页头“发布台”查看 Compose 连接、发布门禁、各环境锁状态、服务健康、活动版本和版本时间线。
 - 对话权限：输入框旁可选择“请求批准”“帮我批准”或“完全访问权限”，每个对话独立保存。
+- 任务隔离：页头“隔离”会在二次确认后从当前 `HEAD` 创建 `coding-agent/task-<id>` 分支和独立 worktree；该对话的 Agent、Diff、测试与 DevOps 随后全部切换到隔离目录。
 - 停止：取消 Agent 循环，并尝试终止当前本地命令。
 - 部署进度：Compose 操作显示目标环境、已用时间和真实阶段轨道；部署依次展示配置校验、构建启动与健康验证。
 - 取消部署：进度条中的“取消部署”会设置对话取消信号，并终止当前 Docker CLI 进程组及其构建子进程。
+- 回滚入口：发布时间线只负责展示审计证据；选择历史版本会把“生成回滚计划”写入对话输入框，仍由 Agent 生成预览并走人工确认，不会从页面直接绕过审批。
 - 本机会话：项目、对话和 Diff 追踪保存在 `.coding-agent/sessions.json`，不会进入 Git。
 
 网页通过仅监听回环地址的本机 Python 服务打开原生目录选择器；选择结果只作为该对话的工作目录保存在本机，不会上传到远程服务。
@@ -152,6 +158,9 @@ python -m coding_agent --no-browser
 | `git_commit` | 提交当前暂存内容 | 不自动暂存；要求单行提交消息 |
 | `git_pull` | 拉取当前分支 | 固定使用 `--ff-only`，不自动合并 |
 | `git_push` | 推送当前分支 | 仅使用已有上游或 `origin/当前分支`，不支持 force/refspec |
+| `github_actions_status` | 查询当前或指定 Commit 的最新工作流状态 | 只读；每个 workflow 只采用最新一次运行 |
+| `github_actions_failed_logs` | 读取失败步骤日志 | 只读；限制字符数并脱敏常见凭据 |
+| `github_actions_rerun_failed` | 重跑指定 run 的失败任务 | 修改远端 CI 状态，任何权限模式下都要求人工确认 |
 | `devops_inspect` / `compose_preflight` | 识别技术栈、Compose 文件和环境；检查 Engine、Compose 与配置 | 只读，不启动容器 |
 | `compose_status` / `compose_logs` / `compose_verify` | 查询服务状态、读取有界日志、汇总健康结果 | 日志最多 1000 行并脱敏常见凭据 |
 | `compose_build` / `compose_pull` | 构建或拉取镜像 | 修改镜像状态，必须审批（完全访问模式除外） |
@@ -162,6 +171,12 @@ python -m coding_agent --no-browser
 | `compose_restart` / `compose_stop` | 重启或停止服务 | 不执行 `down`，不删除容器、网络或数据卷 |
 
 常见 Git 工作流使用参数数组直接调用 Git，不经过 Shell。Git 结果使用结构化 JSON 返回，并区分非仓库、无内容可提交、认证失败、远端拒绝、无法快进/冲突和其他失败。`git_pull` 造成的文件变化也会进入当前对话的累计 Diff。
+
+### 任务级 worktree 隔离
+
+worktree 隔离是显式启用的，不会在新建对话时暗中修改仓库。创建前要求当前对话尚未产生文件改动，并要求仓库至少有一个提交；来源工作区的未提交内容不会复制到隔离目录。隔离成功后，会话持久化 worktree 路径、任务分支、来源分支和基准 Commit，服务重启后仍恢复到同一目录。若目录被外部删除，会话安全回退到项目工作区并给出系统提示。
+
+隔离分支不会自动合并、rebase、删除或清理。开发者应在 Diff 审查后提交任务分支，再通过已有 Git 工具推送并创建 PR，或在仓库中自行合并。删除网页对话只删除会话记录，故意保留 worktree 与分支，避免丢失未提交代码。隔离 worktree 与来源项目共享发布历史和环境操作锁，因此两个对话不会绕过同一 Docker 环境的并发保护。
 
 结构化 Git 权限规则：
 
@@ -216,11 +231,17 @@ require_clean_worktree = true
 name = "unit-tests"
 command = ["python", "-m", "pytest", "-q"]
 timeout_seconds = 300
+
+[devops.github_actions]
+require_success = true
+workflows = ["tests", "lint"]
 ```
 
 其中 `staging-host` 应由开发者提前使用 `docker context create` 配置。健康验证会在超时范围内等待 Compose healthcheck 从 `starting` 收敛，并在容器就绪后执行可选 HTTP 探针。发布门禁可以强制要求 Git 提交、干净工作区和一组参数数组形式的检查命令。配置只保存 Context 名称，不保存主机密码、私钥、Token 或环境变量值；所有 Docker 和门禁命令都不经过 Shell。
 
 发布确认会完整展示每个门禁检查的名称、参数数组、超时和安全分类。`pytest`、受限的 `python -m pytest/unittest/compileall/py_compile` 以及常见构建命令可以作为已识别检查；Shell、提权解释器和 `python -c` 直接拒绝，其他自定义程序必须人工确认，即使处于 `full` 模式。本次对话修改过 `coding-agent.toml` 时也会强制再次确认。确认绑定配置文件 SHA-256，确认后配置发生变化会以 `release_gate_approval_required` 停止，不会执行 Docker 变更。
+
+启用 `devops.github_actions.require_success` 后，正式发布会查询当前 Commit；配置的 workflow 必须全部存在、完成且结论为 `success`，否则在任何 Docker 变更前停止。成功证据中的 workflow run ID、URL、Commit 和检查时间随版本记录保存。日常诊断可以先调用状态工具，读取失败 run 的日志，修复并推送代码；重新运行失败任务始终需要人工确认。
 
 推荐在网页中这样下达任务：
 
@@ -333,8 +354,8 @@ python -m pytest
 - 多个工具调用按模型返回顺序串行执行。
 - 只处理 UTF-8 文本文件，不编辑二进制文件。
 - 不自动提交 Git；结构化提交只会在模型明确调用且权限规则允许时执行。
-- 暂不提供任务级 Git worktree 隔离、Git 图形操作栏、PR 托管平台集成、merge/rebase 结构化工具、插件系统或自主网络搜索。
-- DevOps 第一阶段只支持 Docker Compose；不包含 Kubernetes、多主机编排、CI 平台 API、流量切换或失败后的无人值守自动回滚。
+- 暂不提供 Git 图形 merge/rebase、自动清理 worktree、PR 创建、插件系统或自主网络搜索。
+- DevOps 第一阶段只支持 Docker Compose；不包含 Kubernetes、多主机编排、流量切换或失败后的无人值守自动回滚。
 - 部署验证支持 Compose healthcheck 和配置化 HTTP 探针；未配置二者的服务只能确认处于 running，不能证明业务接口正确。
 - Compose 进度以阶段和已用时间为粒度，不解析 BuildKit 的逐层百分比；取消后已经完成的镜像层或容器状态不会自动回滚。
 - 已被 Docker 垃圾回收的历史镜像无法直接回滚；系统会在修改服务前检查镜像 ID 并以结构化错误停止。当前版本记录是本机控制面的审计数据，不替代远程镜像仓库的保留策略。
