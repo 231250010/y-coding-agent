@@ -40,6 +40,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .item-menu { position: fixed; z-index: 30; display: grid; gap: 2px; min-width: 150px; padding: 6px; border: 1px solid var(--border); border-radius: 10px; background: var(--paper); box-shadow: var(--shadow); }
 .item-menu button { display: block; width: 100%; padding: 8px 10px; border: 0; border-radius: 7px; background: transparent; color: var(--ink); text-align: left; font-size: 12px; cursor: pointer; }
 .item-menu button:hover { background: var(--canvas); }
+.item-menu button:focus-visible { outline: 2px solid rgb(242 169 126 / 70%); outline-offset: -2px; }
 .item-menu button.danger { color: var(--rose-ink); }
 .item-menu button.danger:hover { background: var(--rose); }
 .task-list { display: grid; gap: 3px; }
@@ -69,6 +70,30 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .message { margin: 0 0 26px; animation: rise 180ms ease-out; }
 .message-label { margin: 0 0 8px; color: var(--muted); font-size: 11px; font-weight: 700; }
 .message-body { max-width: 780px; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.72; font-size: 14px; }
+.message-body.markdown { white-space: normal; overflow-wrap: break-word; }
+.markdown > :first-child { margin-top: 0; }
+.markdown > :last-child { margin-bottom: 0; }
+.markdown p { margin: 0 0 12px; }
+.markdown h2, .markdown h3, .markdown h4, .markdown h5 { margin: 24px 0 9px; color: #172733; line-height: 1.3; letter-spacing: -.018em; }
+.markdown h2 { padding-bottom: 8px; border-bottom: 1px solid var(--border); font-size: 19px; }
+.markdown h3 { font-size: 16px; }
+.markdown h4, .markdown h5 { font-size: 14px; }
+.markdown strong { color: #172733; font-weight: 750; }
+.markdown em { color: #465762; }
+.markdown a { color: #185e87; text-decoration-color: rgb(24 94 135 / 35%); text-underline-offset: 3px; }
+.markdown a:hover { color: var(--accent-dark); text-decoration-color: currentColor; }
+.markdown ul, .markdown ol { margin: 8px 0 15px; padding-left: 23px; }
+.markdown li { padding-left: 3px; margin: 4px 0; }
+.markdown li::marker { color: var(--accent-dark); font-weight: 750; }
+.markdown blockquote { margin: 14px 0; padding: 10px 14px; border-left: 3px solid var(--accent); border-radius: 0 8px 8px 0; background: rgb(255 255 255 / 58%); color: #52616b; }
+.md-inline-code { padding: 2px 5px; border: 1px solid #d7e0e5; border-radius: 5px; background: #eef2f4; color: #7b3f28; font-family: var(--mono); font-size: .88em; }
+.md-code-block { margin: 15px 0; overflow: hidden; border: 1px solid #263b49; border-radius: 11px 11px 11px 4px; background: #182631; box-shadow: 0 8px 20px rgb(24 38 49 / 9%); }
+.md-code-head { padding: 7px 12px; border-bottom: 1px solid rgb(237 244 247 / 10%); color: #9fb4c0; font-family: var(--mono); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }
+.md-code-block pre { margin: 0; overflow: auto; padding: 13px 15px 15px; color: #edf4f7; font-family: var(--mono); font-size: 12px; line-height: 1.6; white-space: pre; }
+.md-table { display: block; max-width: 100%; margin: 15px 0; overflow-x: auto; border-collapse: collapse; font-size: 12px; }
+.md-table th, .md-table td { min-width: 110px; padding: 8px 10px; border: 1px solid var(--border); text-align: left; vertical-align: top; }
+.md-table th { background: #edf2f5; color: #304652; font-size: 11px; }
+.md-table tbody tr:nth-child(even) { background: rgb(255 255 255 / 58%); }
 .message.user { display: flex; flex-direction: column; align-items: flex-end; }
 .message.user .message-label { display: none; }
 .message.user .message-body { max-width: min(680px, 86%); padding: 11px 15px; border-radius: 16px 16px 5px 16px; background: #e9f0f5; }

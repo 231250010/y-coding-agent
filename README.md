@@ -1,6 +1,6 @@
 # Coding Agent：从零实现的本地编程智能体
 
-这是一个个人独立设计并实现的编程智能体。它在本机启动网页工作台，通过支持 OpenAI Chat Completions tool calling 的模型自主读取与修改工作区文件、执行命令、观察结果并继续迭代，直到完成任务或触发安全终止条件。
+这是一个个人独立设计并实现、面向开发运维部署一体化的编程智能体。它在本机启动网页工作台，通过支持 OpenAI Chat Completions tool calling 的模型自主读取与修改工作区文件、执行命令、操作 Git，并对 Docker Compose 应用执行部署前检查、构建部署、状态验证、日志读取和服务运维，直到完成任务或触发安全终止条件。
 
 浏览器只承担展示和输入。对话历史、上下文压缩、工具协议、本地调度、模型输出解析、循环控制、安全策略和错误恢复均由本仓库代码实现。
 
@@ -51,6 +51,8 @@
 - `agent.py`：自主循环、模型输出解析、工具结果回传和终止条件。
 - `model.py`：`openai` 基础客户端的薄适配层，不包含 Agent 逻辑。
 - `tools.py`：工具 Schema、参数校验和六个本地工具。
+- `git_service.py` / `git_tools.py`：结构化 Git 控制面和审批规则。
+- `devops_service.py` / `devops_tools.py`：结构化 Docker Compose 控制面、环境配置和审批规则。
 - `safety.py`：命令风险分类。
 - `context.py`：token 粗略估算、完整轮次摘要和保守裁剪。
 - `web_runtime.py`：项目、对话、后台任务、审批和会话持久化。
@@ -148,6 +150,11 @@ python -m coding_agent --no-browser
 | `git_commit` | 提交当前暂存内容 | 不自动暂存；要求单行提交消息 |
 | `git_pull` | 拉取当前分支 | 固定使用 `--ff-only`，不自动合并 |
 | `git_push` | 推送当前分支 | 仅使用已有上游或 `origin/当前分支`，不支持 force/refspec |
+| `devops_inspect` / `compose_preflight` | 识别技术栈、Compose 文件和环境；检查 Engine、Compose 与配置 | 只读，不启动容器 |
+| `compose_status` / `compose_logs` / `compose_verify` | 查询服务状态、读取有界日志、汇总健康结果 | 日志最多 1000 行并脱敏常见凭据 |
+| `compose_build` / `compose_pull` | 构建或拉取镜像 | 修改镜像状态，必须审批（完全访问模式除外） |
+| `compose_deploy` | 校验配置，执行 `up --detach --build`，立即验证 | 不跳过 preflight/verify，不声称未验证的成功 |
+| `compose_restart` / `compose_stop` | 重启或停止服务 | 不执行 `down`，不删除容器、网络或数据卷 |
 
 常见 Git 工作流使用参数数组直接调用 Git，不经过 Shell。Git 结果使用结构化 JSON 返回，并区分非仓库、无内容可提交、认证失败、远端拒绝、无法快进/冲突和其他失败。`git_pull` 造成的文件变化也会进入当前对话的累计 Diff。
 
@@ -159,6 +166,50 @@ python -m coding_agent --no-browser
 - hard reset、clean、force push 和删除远端引用不属于结构化工具；通用命令的既有破坏性操作拒绝规则继续生效。
 
 工具参数由项目自己的轻量验证器依据 JSON Schema 校验。非法 JSON、缺少参数、未知参数和未知工具都会成为结构化 `tool` 错误结果返回模型，让模型有机会修正调用。
+
+## 开发、部署与运维一体化
+
+### 目标环境选择
+
+本项目把第一阶段交付目标定义为 **Docker Compose 单机环境**，同时用 Docker Context 支持远程 Linux 主机。这个范围适合课程项目，也能形成完整且可演示的闭环：
+
+```text
+分析项目 → 修改代码 → 运行测试 → 检查 Git Diff
+    → Compose 预检 → 构建/部署 → 健康验证
+    → 查看状态/日志 → 修复问题 → 再次验证
+```
+
+与直接引入 Kubernetes 相比，Compose 能覆盖个人开发者、小团队测试环境和单机应用部署的高频需求，并把编排复杂度控制在项目可以完整实现、测试和解释的范围内。通过预先创建的 Docker Context，同一套结构化工具可以操作本机 Docker Desktop，也可以操作经 SSH 连接的远程 Docker Engine；智能体不保存 SSH 私钥或仓库凭据。
+
+### 项目配置
+
+如果项目根目录已有 `compose.yaml`、`compose.yml`、`docker-compose.yaml` 或 `docker-compose.yml`，无需配置即可使用当前 Docker Context。需要多个环境时，可创建版本化的 `coding-agent.toml`：
+
+```toml
+[devops]
+compose_file = "compose.yaml"
+default_environment = "local"
+
+[devops.environments.local]
+
+[devops.environments.staging]
+docker_context = "staging-host"
+```
+
+其中 `staging-host` 应由开发者提前使用 `docker context create` 配置。配置只保存 Context 名称，不保存主机密码、私钥、Token 或环境变量值。Compose 路径必须位于当前工作区，环境名、Context 名和服务名均经过白名单字符校验，所有 Docker 调用使用参数数组并设置超时，不经过 Shell。
+
+推荐在网页中这样下达任务：
+
+> 检查这个项目的测试和 Compose 配置。修复测试失败，展示 Git Diff；部署到 staging 前先做预检，得到批准后部署，并用容器状态和 healthcheck 验证结果。如果失败，读取 web 服务最近 200 行日志并继续诊断。
+
+仓库中的 `examples/devops-demo/` 是一个可直接选择为工作目录的最小演示项目，提供 Dockerfile、Compose 配置、healthcheck 和本机回环端口，便于答辩时展示完整工具链。首次构建需要 Docker 能够拉取 Python 基础镜像。
+
+### DevOps 审批边界
+
+- 环境识别、预检、状态、日志和健康验证属于只读查询，在三种权限模式下自动执行。
+- 构建、拉取、部署、重启和停止会改变镜像、容器或服务状态，在 `request` 和 `risk` 模式下均要求明确批准。
+- 只有 `full` 模式自动执行这些状态变更；它仍不提供删除数据卷、远程主机任意命令、提权或破坏 Git 历史的结构化能力。
+- `compose_stop` 只停止服务，不执行 `down -v`；第一阶段不提供自动回滚，失败时保留现场供开发者审查日志和状态。
 
 ## 安全模型
 
@@ -214,7 +265,7 @@ python -m coding_agent --no-browser
 python -m pytest
 ```
 
-自动化测试使用脚本化假模型，不访问真实 API。覆盖 Agent 循环、工具协议、文件与命令安全、上下文压缩、会话持久化、本机 HTTP 边界、网页状态机、项目/对话管理和 Diff 展示。
+自动化测试使用脚本化假模型和假 Docker Runner，不访问真实 API、Docker Engine 或远程服务器。覆盖 Agent 循环、工具协议、文件与命令安全、Git 与 Compose 参数数组、DevOps 环境边界、审批矩阵、日志脱敏、部署验证、上下文压缩、会话持久化、本机 HTTP 边界、网页状态机、项目/对话管理和 Diff 展示。
 
 ## 人工端到端演示
 
@@ -231,4 +282,7 @@ python -m pytest
 - 只处理 UTF-8 文本文件，不编辑二进制文件。
 - 不自动提交 Git；结构化提交只会在模型明确调用且权限规则允许时执行。
 - 暂不提供任务级 Git worktree 隔离、Git 图形操作栏、PR 托管平台集成、merge/rebase 结构化工具、插件系统或自主网络搜索。
+- DevOps 第一阶段只支持 Docker Compose；不包含 Kubernetes、多主机编排、CI 平台 API、流量切换或自动回滚。
+- 部署验证依据 Compose 容器状态与 healthcheck；没有 healthcheck 的服务只能确认处于 running，不能证明业务接口正确。
+- Compose 长操作有超时，但暂未实现工具内部的实时进度流和细粒度取消。
 - 不同兼容网关对 Chat Completions tool calling 的实现程度可能不同。

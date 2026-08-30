@@ -23,6 +23,8 @@ HTTP 服务固定监听 `127.0.0.1`，浏览器负责项目、对话、审批、
 | `tools.py` | 文件、搜索、编辑与通用命令工具 |
 | `git_service.py` | 参数数组式 Git 查询和写操作 |
 | `git_tools.py` | Git Schema、参数验证和权限矩阵 |
+| `devops_service.py` | Docker Compose 项目识别、环境选择、命令执行和结果归一化 |
+| `devops_tools.py` | DevOps Schema、参数验证、审批矩阵和结构化错误 |
 | `changes.py` | 对话级文件快照和累计 Diff |
 | `context.py` | 上下文估算、摘要与保守裁剪 |
 | `session_store.py` | 本机会话原子持久化与兼容加载 |
@@ -46,7 +48,8 @@ CodingAgent
   ├── ChatModel
   └── CompositeToolProvider
         ├── ToolRegistry (files / command)
-        └── GitToolProvider -> GitService
+        ├── GitToolProvider -> GitService
+        └── DevOpsToolProvider -> DevOpsService -> Docker CLI / Context
 ```
 
 一次编程任务的主要流程：
@@ -67,12 +70,15 @@ CodingAgent
 
 ## 工具组合与 Git
 
-`build_default_tool_provider()` 为有工作目录的对话组合两组工具：
+`build_default_tool_provider()` 为有工作目录的对话组合三组工具：
 
 - 文件与命令：浏览、读取、搜索、写入、精确替换和受控命令；
 - Git：status、diff、log、branches、create branch、stage、unstage、commit、pull 和 push。
+- DevOps：inspect、preflight、build、pull、deploy、status、logs、verify、restart 和 stop。
 
 Git 命令使用参数数组和 `shell=False`。路径必须位于当前工作目录内；pull 固定使用 fast-forward-only；push 只使用已有上游或 `origin/当前分支`。hard reset、clean、force push 和删除远端引用不属于结构化能力，并由通用命令安全规则拒绝。
+
+DevOps 控制面以 Docker Compose 为第一阶段目标。默认使用当前 Docker Context，也可从工作区内的 `coding-agent.toml` 选择预配置的远程 Context。Compose 文件必须位于工作区，环境、Context 和服务名称只接受安全字符；命令使用参数数组和 `shell=False`。部署先校验配置，再执行后台构建启动，最后将容器 state 和 health 归一化为逐服务验证结果。日志限制行数并对常见 Token、密码和 URL 用户信息进行脱敏。
 
 无工作目录的对话不暴露本地工具，仍可处理一般问答。
 
@@ -81,6 +87,8 @@ Git 命令使用参数数组和 `shell=False`。路径必须位于当前工作�
 - `request`：只读操作自动执行，编辑、测试及 Git 写操作询问；
 - `risk`：普通工作区编辑自动执行，联网、远端 Git 和高风险命令询问；
 - `full`：减少常规审批，但不可恢复 Git 历史修改、提权和系统控制仍拒绝。
+
+DevOps 的构建、拉取、部署、重启和停止在 `request` 与 `risk` 中都需要审批，因为它们可能改变远程环境；只读预检、状态、日志和验证自动执行。停止操作不会删除容器或数据卷，控制面不提供 `down -v`、任意远程命令或自动回滚。
 
 需要审批时，后台 Agent 创建审批记录并等待。浏览器通过 `/api/approvals/{id}` 返回决定；拒绝会作为可恢复工具错误交给模型。
 
@@ -102,4 +110,4 @@ HTTP 服务按请求使用线程。每个运行中的对话有独立取消事件
 
 ## 测试边界
 
-测试覆盖 Agent 工具协议、上下文、文件与 Git 安全边界、WebRuntime、HTTP 边界、持久化和浏览器静态资源。Git 远端测试只使用本地 bare 仓库；自动化测试不调用真实模型 API，也不访问公共互联网。
+测试覆盖 Agent 工具协议、上下文、文件、Git 与 DevOps 安全边界、WebRuntime、HTTP 边界、持久化和浏览器静态资源。Git 远端测试只使用本地 bare 仓库；Compose 测试使用记录参数数组的假 Docker Runner。自动化测试不调用真实模型 API、Docker Engine 或公共互联网。

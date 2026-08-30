@@ -1,0 +1,5 @@
+[devops]
+compose_file = "compose.yaml"
+default_environment = "local"
+
+[devops.environments.local]

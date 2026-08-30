@@ -1,0 +1,19 @@
+# DevOps 闭环演示项目
+
+这是一个只使用 Python 标准库的 HTTP 服务，用于演示 Coding Agent 的 Docker Compose 结构化能力。容器仅把端口暴露到宿主机回环地址 `127.0.0.1:8088`，并提供 `/health` 健康检查。
+
+在网页中新建项目并选择本目录，然后发送：
+
+> 识别这个项目的部署配置，对 local 环境执行预检。得到我的批准后部署，验证每个服务的健康状态，读取 web 服务最近 50 行日志并总结证据。
+
+预期工具顺序：
+
+```text
+devops_inspect
+  → compose_preflight
+  → compose_deploy（需要审批）
+  → compose_verify
+  → compose_logs
+```
+
+部署成功后可访问 `http://127.0.0.1:8088/`。演示结束时可以要求智能体停止 `web` 服务；`compose_stop` 不删除容器、镜像、网络或数据卷。

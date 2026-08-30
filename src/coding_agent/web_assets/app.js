@@ -29,6 +29,7 @@ let workspaceMode = "project";
 let renameTarget = null;
 let deleteTarget = null;
 let menuEl = null;
+let menuAnchor = null;
 let shownApproval = null;
 let lastTranscriptKey = "";
 let toastTimer = null;
@@ -38,6 +39,123 @@ function element(tag, className, text) {
   if (className) node.className = className;
   if (text !== undefined) node.textContent = text;
   return node;
+}
+
+function appendInlineMarkdown(parent, text) {
+  const pattern = /(`[^`\n]+`|\*\*[^*\n]+\*\*|__[^_\n]+__|\*[^*\n]+\*|\[[^\]\n]+\]\(https?:\/\/[^\s)]+\))/g;
+  let cursor = 0;
+  for (const match of text.matchAll(pattern)) {
+    if (match.index > cursor) parent.append(document.createTextNode(text.slice(cursor, match.index)));
+    const token = match[0];
+    if (token.startsWith("`")) {
+      parent.append(element("code", "md-inline-code", token.slice(1, -1)));
+    } else if (token.startsWith("**") || token.startsWith("__")) {
+      parent.append(element("strong", "", token.slice(2, -2)));
+    } else if (token.startsWith("*")) {
+      parent.append(element("em", "", token.slice(1, -1)));
+    } else {
+      const split = token.lastIndexOf("](");
+      const link = element("a", "", token.slice(1, split));
+      link.href = token.slice(split + 2, -1);
+      link.target = "_blank";
+      link.rel = "noreferrer noopener";
+      parent.append(link);
+    }
+    cursor = match.index + token.length;
+  }
+  if (cursor < text.length) parent.append(document.createTextNode(text.slice(cursor)));
+}
+
+function markdownCells(line) {
+  let value = line.trim();
+  if (value.startsWith("|")) value = value.slice(1);
+  if (value.endsWith("|")) value = value.slice(0, -1);
+  return value.split("|").map((cell) => cell.trim());
+}
+
+function isTableDivider(line) {
+  const cells = markdownCells(line);
+  return cells.length > 1 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+function startsMarkdownBlock(lines, index) {
+  const line = lines[index] || "";
+  return /^```/.test(line) || /^(#{1,4})\s+/.test(line) || /^\s*([-+*]|\d+[.)])\s+/.test(line)
+    || /^>\s?/.test(line) || (line.includes("|") && isTableDivider(lines[index + 1] || ""));
+}
+
+function renderMarkdown(text, root) {
+  root.classList.add("markdown");
+  const lines = String(text || "").replace(/\r\n?/g, "\n").split("\n");
+  let index = 0;
+  while (index < lines.length) {
+    if (!lines[index].trim()) { index += 1; continue; }
+
+    const fence = lines[index].match(/^```\s*([\w.+-]*)\s*$/);
+    if (fence) {
+      const language = fence[1] || "text";
+      const content = [];
+      index += 1;
+      while (index < lines.length && !/^```\s*$/.test(lines[index])) content.push(lines[index++]);
+      if (index < lines.length) index += 1;
+      const block = element("div", "md-code-block");
+      block.append(element("div", "md-code-head", language), element("pre", "", content.join("\n")));
+      root.append(block);
+      continue;
+    }
+
+    const heading = lines[index].match(/^(#{1,4})\s+(.+)$/);
+    if (heading) {
+      const node = element(`h${Math.min(heading[1].length + 1, 5)}`, "");
+      appendInlineMarkdown(node, heading[2]);
+      root.append(node); index += 1; continue;
+    }
+
+    if (lines[index].includes("|") && isTableDivider(lines[index + 1] || "")) {
+      const table = element("table", "md-table");
+      const head = element("thead", "");
+      const headRow = element("tr", "");
+      for (const cell of markdownCells(lines[index])) {
+        const th = element("th", ""); appendInlineMarkdown(th, cell); headRow.append(th);
+      }
+      head.append(headRow); table.append(head); index += 2;
+      const body = element("tbody", "");
+      while (index < lines.length && lines[index].includes("|") && lines[index].trim()) {
+        const row = element("tr", "");
+        for (const cell of markdownCells(lines[index])) {
+          const td = element("td", ""); appendInlineMarkdown(td, cell); row.append(td);
+        }
+        body.append(row); index += 1;
+      }
+      table.append(body); root.append(table); continue;
+    }
+
+    const listMatch = lines[index].match(/^\s*([-+*]|\d+[.)])\s+(.+)$/);
+    if (listMatch) {
+      const ordered = /^\d/.test(listMatch[1]);
+      const list = element(ordered ? "ol" : "ul", "");
+      while (index < lines.length) {
+        const item = lines[index].match(/^\s*([-+*]|\d+[.)])\s+(.+)$/);
+        if (!item || /^\d/.test(item[1]) !== ordered) break;
+        const li = element("li", ""); appendInlineMarkdown(li, item[2]); list.append(li); index += 1;
+      }
+      root.append(list); continue;
+    }
+
+    if (/^>\s?/.test(lines[index])) {
+      const quoteLines = [];
+      while (index < lines.length && /^>\s?/.test(lines[index])) quoteLines.push(lines[index++].replace(/^>\s?/, ""));
+      const quote = element("blockquote", ""); appendInlineMarkdown(quote, quoteLines.join(" ")); root.append(quote); continue;
+    }
+
+    const paragraphLines = [lines[index++].trim()];
+    while (index < lines.length && lines[index].trim() && !startsMarkdownBlock(lines, index)) {
+      paragraphLines.push(lines[index++].trim());
+    }
+    const paragraph = element("p", "");
+    appendInlineMarkdown(paragraph, paragraphLines.join(" "));
+    root.append(paragraph);
+  }
 }
 
 async function api(path, options = {}) {
@@ -108,7 +226,10 @@ function messageNode(entry) {
   const article = element("article", `message ${entry.kind}`);
   const labels = { assistant: "小码", tool: "本地工具", error: "运行错误", system: "系统" };
   article.append(element("p", "message-label", labels[entry.kind] || "你"));
-  article.append(element("div", "message-body", entry.text));
+  const body = element("div", "message-body");
+  if (entry.kind === "assistant") renderMarkdown(entry.text, body);
+  else body.textContent = entry.text;
+  article.append(body);
   if (entry.change_paths && entry.change_paths.length) {
     const summary = element("div", "change-summary");
     summary.append(element("p", "change-summary-title", `本轮改动 · ${entry.change_paths.length} 个文件`));
@@ -335,32 +456,50 @@ async function submitRename(event) {
 function itemMenuElement() {
   if (menuEl) return menuEl;
   menuEl = element("div", "item-menu");
+  menuEl.setAttribute("role", "menu");
   menuEl.hidden = true;
   document.body.append(menuEl);
   document.addEventListener("click", (event) => {
-    if (!menuEl.hidden && !menuEl.contains(event.target)) menuEl.hidden = true;
+    if (!menuEl.hidden && !menuEl.contains(event.target) && !menuAnchor?.contains(event.target)) closeItemMenu();
   });
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") menuEl.hidden = true;
+    if (event.key === "Escape") closeItemMenu();
   });
   return menuEl;
 }
 
+function closeItemMenu() {
+  if (menuEl) menuEl.hidden = true;
+  if (menuAnchor) menuAnchor.setAttribute("aria-expanded", "false");
+  menuAnchor = null;
+}
+
 function openItemMenu(kind, id, title, anchor) {
   const menu = itemMenuElement();
+  if (!menu.hidden && menuAnchor === anchor) { closeItemMenu(); return; }
+  closeItemMenu();
+  menuAnchor = anchor;
+  anchor.setAttribute("aria-haspopup", "menu");
+  anchor.setAttribute("aria-expanded", "true");
   menu.replaceChildren();
   const rename = element("button", "", "重命名");
   rename.type = "button";
-  rename.addEventListener("click", () => { menu.hidden = true; openRename(kind, id, title); });
+  rename.setAttribute("role", "menuitem");
+  rename.addEventListener("click", () => { closeItemMenu(); openRename(kind, id, title); });
   const remove = element("button", "danger", "删除");
   remove.type = "button";
-  remove.addEventListener("click", () => { menu.hidden = true; openDelete(kind, id, title); });
+  remove.setAttribute("role", "menuitem");
+  remove.addEventListener("click", () => { closeItemMenu(); openDelete(kind, id, title); });
   menu.append(rename, remove);
   menu.hidden = false;
   const rect = anchor.getBoundingClientRect();
-  menu.style.left = `${Math.max(6, Math.min(rect.left, window.innerWidth - 160))}px`;
-  menu.style.top = `${rect.bottom + 4}px`;
-  if (rect.bottom + 88 > window.innerHeight) menu.style.top = `${rect.top - 84}px`;
+  const left = Math.max(8, Math.min(rect.right - menu.offsetWidth, window.innerWidth - menu.offsetWidth - 8));
+  const below = rect.bottom + 6;
+  const top = below + menu.offsetHeight <= window.innerHeight - 8
+    ? below : Math.max(8, rect.top - menu.offsetHeight - 6);
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+  rename.focus();
 }
 
 function openDelete(kind, id, title) {
@@ -430,7 +569,11 @@ document.querySelector("#add-project").addEventListener("click", () => openWorks
 document.querySelector("#workspace-button").addEventListener("click", () => openWorkspace("task"));
 document.querySelector("#composer-workspace").addEventListener("click", () => openWorkspace("task"));
 document.querySelector("#open-settings").addEventListener("click", openSettings);
-document.querySelector("#rename-current").addEventListener("click", (event) => { const task = currentTask(); if (task) openItemMenu("task", task.id, task.title, event.currentTarget); });
+document.querySelector("#rename-current").addEventListener("click", (event) => {
+  event.stopPropagation();
+  const task = currentTask();
+  if (task) openItemMenu("task", task.id, task.title, event.currentTarget);
+});
 document.querySelector("#close-diff").addEventListener("click", closeDiff);
 document.querySelector("#open-sidebar").addEventListener("click", openSidebar);
 document.querySelector("#close-sidebar").addEventListener("click", closeSidebar);

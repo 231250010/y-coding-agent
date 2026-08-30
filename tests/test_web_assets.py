@@ -77,3 +77,26 @@ def test_frontend_exposes_delete_for_projects_and_conversations() -> None:
 
     assert 'id="delete-dialog"' in html
     assert 'method: "DELETE"' in js
+
+
+def test_header_menu_stops_click_bubbling_and_exposes_both_actions() -> None:
+    js = asset("app.js")
+
+    handler = js[js.index('document.querySelector("#rename-current")'):]
+    assert "event.stopPropagation();" in handler[:300]
+    assert 'element("button", "", "重命名")' in js
+    assert 'element("button", "danger", "删除")' in js
+    assert 'setAttribute("aria-expanded", "true")' in js
+    assert "closeItemMenu()" in js
+
+
+def test_assistant_markdown_uses_safe_dom_rendering_and_has_rich_styles() -> None:
+    js = asset("app.js")
+    css = asset("app.css")
+
+    assert "function renderMarkdown" in js
+    assert 'entry.kind === "assistant"' in js
+    assert "appendInlineMarkdown" in js
+    assert "innerHTML" not in js
+    for selector in [".message-body.markdown", ".md-inline-code", ".md-code-block", ".md-table"]:
+        assert selector in css

@@ -41,7 +41,7 @@ def test_composite_rejects_duplicate_and_unknown_tools() -> None:
     assert CompositeToolProvider([]).execute("missing", {}).error == "未知工具: missing"
 
 
-def test_default_provider_adds_git_tools_for_selected_workspace(tmp_path: Path) -> None:
+def test_default_provider_adds_git_and_devops_tools_for_selected_workspace(tmp_path: Path) -> None:
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
     tracker = ConversationChangeTracker(tmp_path)
 
@@ -51,6 +51,9 @@ def test_default_provider_adds_git_tools_for_selected_workspace(tmp_path: Path) 
     assert names[:2] == ["list_files", "read_file"]
     assert "git_status" in names
     assert "git_push" in names
+    assert "devops_inspect" in names
+    assert "compose_deploy" in names
+    assert "compose_verify" in names
     assert getattr(tools, "change_tracker", None) is tracker
 
 

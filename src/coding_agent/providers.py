@@ -61,9 +61,11 @@ def build_default_tool_provider(
     approval_mode: str = "risk",
     change_tracker: ConversationChangeTracker | None = None,
 ) -> ToolProvider:
-    """Compose built-in file/command tools with structured Git tools."""
+    """Compose file/command, Git, and Docker Compose DevOps tools."""
     from .git_service import GitService
     from .git_tools import GitToolProvider
+    from .devops_service import DevOpsService
+    from .devops_tools import DevOpsToolProvider
     from .tools import ToolRegistry
 
     local = ToolRegistry(
@@ -81,4 +83,10 @@ def build_default_tool_provider(
         approval_mode=approval_mode,
         change_tracker=change_tracker,
     )
-    return CompositeToolProvider([local, git])
+    devops = DevOpsToolProvider(
+        DevOpsService(workspace),
+        approver=approver,
+        approval_mode=approval_mode,
+        change_tracker=change_tracker,
+    )
+    return CompositeToolProvider([local, git, devops])
