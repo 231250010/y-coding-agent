@@ -117,6 +117,75 @@ def test_deploy_validates_then_verifies_healthy_services(tmp_path: Path) -> None
     assert all(item["ready"] for item in result["verification"]["services"])
 
 
+def test_deploy_reports_real_phase_transitions(tmp_path: Path) -> None:
+    write_compose(tmp_path)
+    runner = FakeDockerRunner()
+    runner.add()
+    runner.add("started")
+    runner.add('[{"Service":"web","State":"running","Health":"healthy"}]')
+    events: list[dict[str, object]] = []
+
+    DevOpsService(tmp_path, runner, on_progress=events.append).deploy()
+
+    assert [(event["phase"], event["state"]) for event in events] == [
+        ("validate", "running"),
+        ("validate", "completed"),
+        ("deploy", "running"),
+        ("deploy", "completed"),
+        ("verify", "running"),
+        ("verify", "completed"),
+    ]
+    assert [event["percent"] for event in events] == [0, 33, 33, 67, 67, 100]
+
+
+def test_running_docker_process_is_terminated_when_cancelled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_compose(tmp_path)
+
+    class BlockingProcess:
+        pid = 4242
+        returncode: int | None = None
+        stdout = None
+        stderr = None
+        killed = False
+
+        def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+            if not self.killed:
+                raise subprocess.TimeoutExpired(["docker"], timeout or 0)
+            return "partial build output", ""
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def wait(self, timeout: float | None = None) -> int:
+            self.returncode = -9
+            return self.returncode
+
+        def kill(self) -> None:
+            self.killed = True
+            self.returncode = -9
+
+    process = BlockingProcess()
+    monkeypatch.setattr(subprocess, "Popen", lambda *_args, **_kwargs: process)
+    checks = iter([False, True])
+    events: list[dict[str, object]] = []
+    service = DevOpsService(
+        tmp_path,
+        is_cancelled=lambda: next(checks, True),
+        on_progress=events.append,
+    )
+    monkeypatch.setattr(service, "_terminate_process_tree", lambda item: item.kill())
+
+    with pytest.raises(DevOpsOperationError) as caught:
+        service.status()
+
+    assert caught.value.code == "operation_cancelled"
+    assert caught.value.output == "partial build output"
+    assert process.killed is True
+    assert events[-1]["state"] == "cancelled"
+
+
 def test_verify_reports_unhealthy_or_stopped_service(tmp_path: Path) -> None:
     write_compose(tmp_path)
     runner = FakeDockerRunner()

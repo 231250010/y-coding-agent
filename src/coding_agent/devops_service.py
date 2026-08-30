@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import subprocess
+import time
 import tomllib
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -12,6 +14,8 @@ from typing import Any
 
 
 DevOpsRunner = Callable[[Sequence[str], Path, float], subprocess.CompletedProcess[str]]
+ProgressCallback = Callable[[dict[str, Any]], None]
+CancelCallback = Callable[[], bool]
 COMPOSE_FILES = ("compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml")
 MANIFESTS = ("package.json", "pyproject.toml", "Cargo.toml", "go.mod", "pom.xml", "build.gradle")
 
@@ -36,31 +40,31 @@ class DevOpsProjectConfig:
     environments: dict[str, DevOpsEnvironment]
 
 
+@dataclass(frozen=True, slots=True)
+class ProgressStep:
+    operation: str
+    environment: str
+    phase: str
+    label: str
+    current: int
+    total: int
+
+
 class DevOpsService:
     """Structured Docker Compose control plane for one developer workspace."""
 
-    def __init__(self, workspace: Path, runner: DevOpsRunner | None = None) -> None:
+    def __init__(
+        self,
+        workspace: Path,
+        runner: DevOpsRunner | None = None,
+        *,
+        is_cancelled: CancelCallback | None = None,
+        on_progress: ProgressCallback | None = None,
+    ) -> None:
         self.workspace = workspace.resolve()
-        self._runner = runner or self._default_runner
-
-    @staticmethod
-    def _default_runner(
-        command: Sequence[str], cwd: Path, timeout: float
-    ) -> subprocess.CompletedProcess[str]:
-        environment = os.environ.copy()
-        environment["DOCKER_CLI_HINTS"] = "false"
-        return subprocess.run(
-            list(command),
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            shell=False,
-            timeout=timeout,
-            env=environment,
-            check=False,
-        )
+        self._runner = runner
+        self.is_cancelled = is_cancelled or (lambda: False)
+        self.on_progress = on_progress or (lambda _data: None)
 
     def inspect(self) -> dict[str, Any]:
         config = self._load_config()
@@ -93,11 +97,25 @@ class DevOpsService:
     def preflight(self, environment: str | None = None) -> dict[str, Any]:
         config, selected = self._resolve_environment(environment)
         compose_file = self._require_compose(config)
-        docker = self._run(self._docker_command(selected, ["version", "--format", "{{.Server.Version}}"]), timeout=30)
-        compose = self._run(self._docker_command(selected, ["compose", "version", "--short"]), timeout=30)
-        self._run(self._compose_command(selected, compose_file, ["config", "--quiet"]), timeout=30)
+        docker = self._run(
+            self._docker_command(selected, ["version", "--format", "{{.Server.Version}}"]),
+            timeout=30,
+            progress=self._step("compose_preflight", selected, "engine", "连接 Docker Engine", 1, 4),
+        )
+        compose = self._run(
+            self._docker_command(selected, ["compose", "version", "--short"]),
+            timeout=30,
+            progress=self._step("compose_preflight", selected, "compose", "检查 Compose 版本", 2, 4),
+        )
+        self._run(
+            self._compose_command(selected, compose_file, ["config", "--quiet"]),
+            timeout=30,
+            progress=self._step("compose_preflight", selected, "config", "校验 Compose 配置", 3, 4),
+        )
         services = self._run(
-            self._compose_command(selected, compose_file, ["config", "--services"]), timeout=30
+            self._compose_command(selected, compose_file, ["config", "--services"]),
+            timeout=30,
+            progress=self._step("compose_preflight", selected, "services", "读取服务清单", 4, 4),
         ).stdout.splitlines()
         return {
             "environment": selected.name,
@@ -112,16 +130,11 @@ class DevOpsService:
     def status(self, environment: str | None = None) -> dict[str, Any]:
         config, selected = self._resolve_environment(environment)
         compose_file = self._require_compose(config)
-        result = self._run(
-            self._compose_command(selected, compose_file, ["ps", "--format", "json"]), timeout=30
+        services = self._status_records(
+            selected,
+            compose_file,
+            self._step("compose_status", selected, "status", "读取服务状态", 1, 1),
         )
-        services = self._parse_json_records(result.stdout)
-        if result.stdout.strip() and not services:
-            raise DevOpsOperationError(
-                "invalid_response",
-                "Docker Compose 返回了无法解析的服务状态",
-                output=self._combined_output(result),
-            )
         return {
             "environment": selected.name,
             "services": services,
@@ -137,7 +150,11 @@ class DevOpsService:
         args = ["logs", "--no-color", "--tail", str(tail)]
         if service:
             args.append(self._validate_service(service))
-        result = self._run(self._compose_command(selected, compose_file, args), timeout=45)
+        result = self._run(
+            self._compose_command(selected, compose_file, args),
+            timeout=45,
+            progress=self._step("compose_logs", selected, "logs", "读取服务日志", 1, 1),
+        )
         return {
             "environment": selected.name,
             "service": service,
@@ -160,12 +177,21 @@ class DevOpsService:
         config, selected = self._resolve_environment(environment)
         compose_file = self._require_compose(config)
         normalized = self._validate_services(services)
-        self._run(self._compose_command(selected, compose_file, ["config", "--quiet"]), timeout=30)
+        self._run(
+            self._compose_command(selected, compose_file, ["config", "--quiet"]),
+            timeout=30,
+            progress=self._step("compose_deploy", selected, "validate", "校验 Compose 配置", 1, 3),
+        )
         result = self._run(
             self._compose_command(selected, compose_file, ["up", "--detach", "--build", *normalized]),
             timeout=600,
+            progress=self._step("compose_deploy", selected, "deploy", "构建并启动服务", 2, 3),
         )
-        verification = self.verify(selected.name)
+        verification = self._verify(
+            selected,
+            compose_file,
+            self._step("compose_deploy", selected, "verify", "验证服务健康状态", 3, 3),
+        )
         return {
             "environment": selected.name,
             "services": normalized,
@@ -174,8 +200,21 @@ class DevOpsService:
         }
 
     def verify(self, environment: str | None = None) -> dict[str, Any]:
-        status = self.status(environment)
-        services = status["services"]
+        config, selected = self._resolve_environment(environment)
+        compose_file = self._require_compose(config)
+        return self._verify(
+            selected,
+            compose_file,
+            self._step("compose_verify", selected, "verify", "验证服务健康状态", 1, 1),
+        )
+
+    def _verify(
+        self,
+        selected: DevOpsEnvironment,
+        compose_file: Path,
+        progress: ProgressStep,
+    ) -> dict[str, Any]:
+        services = self._status_records(selected, compose_file, progress)
         results: list[dict[str, Any]] = []
         for item in services:
             state = str(item.get("State") or item.get("state") or "").lower()
@@ -189,7 +228,7 @@ class DevOpsService:
                 }
             )
         return {
-            "environment": status["environment"],
+            "environment": selected.name,
             "healthy": bool(results) and all(item["ready"] for item in results),
             "services": results,
         }
@@ -216,7 +255,21 @@ class DevOpsService:
         compose_file = self._require_compose(config)
         normalized = self._validate_services(services)
         result = self._run(
-            self._compose_command(selected, compose_file, [operation, *normalized]), timeout=timeout
+            self._compose_command(selected, compose_file, [operation, *normalized]),
+            timeout=timeout,
+            progress=self._step(
+                f"compose_{operation}",
+                selected,
+                operation,
+                {
+                    "build": "构建服务镜像",
+                    "pull": "拉取服务镜像",
+                    "restart": "重启服务",
+                    "stop": "停止服务",
+                }.get(operation, f"执行 {operation}"),
+                1,
+                1,
+            ),
         )
         return {
             "operation": operation,
@@ -327,19 +380,203 @@ class DevOpsService:
         return self._docker_command(environment, ["compose", "--file", str(compose_file), *args])
 
     def _run(
-        self, command: Sequence[str], *, timeout: float
+        self,
+        command: Sequence[str],
+        *,
+        timeout: float,
+        progress: ProgressStep | None = None,
     ) -> subprocess.CompletedProcess[str]:
+        self._check_cancelled()
+        started = time.monotonic()
+        self._emit_progress(progress, "running", elapsed=0.0, completed=False)
         try:
-            result = self._runner(command, self.workspace, timeout)
+            if self._runner is not None:
+                result = self._runner(command, self.workspace, timeout)
+                self._check_cancelled()
+            else:
+                result = self._run_process(command, timeout, progress, started)
         except FileNotFoundError as exc:
+            self._emit_progress(progress, "failed", elapsed=time.monotonic() - started)
             raise DevOpsOperationError("docker_unavailable", "本机未找到 Docker CLI") from exc
         except subprocess.TimeoutExpired as exc:
+            self._emit_progress(progress, "failed", elapsed=time.monotonic() - started)
             raise DevOpsOperationError("operation_timeout", "Docker Compose 操作超时") from exc
+        except DevOpsOperationError as exc:
+            state = "cancelled" if exc.code == "operation_cancelled" else "failed"
+            self._emit_progress(progress, state, elapsed=time.monotonic() - started)
+            raise
         except OSError as exc:
+            self._emit_progress(progress, "failed", elapsed=time.monotonic() - started)
             raise DevOpsOperationError("compose_failed", f"无法启动 Docker CLI: {exc}") from exc
         if result.returncode != 0:
+            self._emit_progress(progress, "failed", elapsed=time.monotonic() - started)
             self._raise_failure(result)
+        self._emit_progress(
+            progress,
+            "completed",
+            elapsed=time.monotonic() - started,
+            completed=True,
+        )
         return result
+
+    def _run_process(
+        self,
+        command: Sequence[str],
+        timeout: float,
+        progress: ProgressStep | None,
+        started: float,
+    ) -> subprocess.CompletedProcess[str]:
+        environment = os.environ.copy()
+        environment["DOCKER_CLI_HINTS"] = "false"
+        options: dict[str, Any] = {
+            "cwd": self.workspace,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+            "shell": False,
+            "env": environment,
+        }
+        if os.name == "nt":
+            options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            options["start_new_session"] = True
+        process = subprocess.Popen(list(command), **options)
+        last_tick = started
+        while True:
+            try:
+                stdout, stderr = process.communicate(timeout=0.2)
+                return subprocess.CompletedProcess(
+                    list(command), process.returncode, stdout=stdout, stderr=stderr
+                )
+            except subprocess.TimeoutExpired:
+                now = time.monotonic()
+                if self.is_cancelled():
+                    self._terminate_process_tree(process)
+                    stdout, stderr = self._collect_after_termination(process)
+                    partial = self._redact("\n".join(filter(None, (stdout.strip(), stderr.strip()))))
+                    raise DevOpsOperationError(
+                        "operation_cancelled",
+                        "Docker Compose 操作已由用户停止",
+                        output=partial,
+                    )
+                if now - started >= timeout:
+                    self._terminate_process_tree(process)
+                    self._collect_after_termination(process)
+                    raise subprocess.TimeoutExpired(list(command), timeout)
+                if now - last_tick >= 0.5:
+                    self._emit_progress(progress, "running", elapsed=now - started, completed=False)
+                    last_tick = now
+            except KeyboardInterrupt:
+                self._terminate_process_tree(process)
+                self._collect_after_termination(process)
+                raise
+
+    def _status_records(
+        self,
+        selected: DevOpsEnvironment,
+        compose_file: Path,
+        progress: ProgressStep,
+    ) -> list[dict[str, Any]]:
+        result = self._run(
+            self._compose_command(selected, compose_file, ["ps", "--format", "json"]),
+            timeout=30,
+            progress=progress,
+        )
+        services = self._parse_json_records(result.stdout)
+        if result.stdout.strip() and not services:
+            raise DevOpsOperationError(
+                "invalid_response",
+                "Docker Compose 返回了无法解析的服务状态",
+                output=self._combined_output(result),
+            )
+        return services
+
+    @staticmethod
+    def _step(
+        operation: str,
+        environment: DevOpsEnvironment,
+        phase: str,
+        label: str,
+        current: int,
+        total: int,
+    ) -> ProgressStep:
+        return ProgressStep(operation, environment.name, phase, label, current, total)
+
+    def _emit_progress(
+        self,
+        progress: ProgressStep | None,
+        state: str,
+        *,
+        elapsed: float,
+        completed: bool = False,
+    ) -> None:
+        if progress is None:
+            return
+        finished = progress.current if completed else progress.current - 1
+        payload = {
+            "operation": progress.operation,
+            "environment": progress.environment,
+            "phase": progress.phase,
+            "label": progress.label,
+            "current": progress.current,
+            "total": progress.total,
+            "percent": round(100 * finished / progress.total),
+            "elapsed_seconds": round(max(0.0, elapsed), 1),
+            "state": state,
+        }
+        try:
+            self.on_progress(payload)
+        except Exception:
+            # Progress reporting is observational and must never break deployment.
+            pass
+
+    def _check_cancelled(self) -> None:
+        if self.is_cancelled():
+            raise DevOpsOperationError(
+                "operation_cancelled", "Docker Compose 操作已由用户停止"
+            )
+
+    @staticmethod
+    def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
+        if process.poll() is not None:
+            return
+        if os.name == "nt":
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                    capture_output=True,
+                    check=False,
+                    timeout=2,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                process.kill()
+        else:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except (OSError, ProcessLookupError):
+                process.terminate()
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            process.kill()
+
+    @staticmethod
+    def _collect_after_termination(process: subprocess.Popen[str]) -> tuple[str, str]:
+        try:
+            return process.communicate(timeout=1)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            if process.stdout:
+                process.stdout.close()
+            if process.stderr:
+                process.stderr.close()
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
+            return "", ""
 
     def _raise_failure(self, result: subprocess.CompletedProcess[str]) -> None:
         output = self._combined_output(result)

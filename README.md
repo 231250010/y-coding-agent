@@ -129,6 +129,8 @@ python -m coding_agent --no-browser
 - 右侧 Diff：点击改动文件后展开，显示 `+/-` 行数、旧/新行号和颜色高亮。
 - 对话权限：输入框旁可选择“请求批准”“帮我批准”或“完全访问权限”，每个对话独立保存。
 - 停止：取消 Agent 循环，并尝试终止当前本地命令。
+- 部署进度：Compose 操作显示目标环境、已用时间和真实阶段轨道；部署依次展示配置校验、构建启动与健康验证。
+- 取消部署：进度条中的“取消部署”会设置对话取消信号，并终止当前 Docker CLI 进程组及其构建子进程。
 - 本机会话：项目、对话和 Diff 追踪保存在 `.coding-agent/sessions.json`，不会进入 Git。
 
 网页通过仅监听回环地址的本机 Python 服务打开原生目录选择器；选择结果只作为该对话的工作目录保存在本机，不会上传到远程服务。
@@ -211,6 +213,16 @@ docker_context = "staging-host"
 - 只有 `full` 模式自动执行这些状态变更；它仍不提供删除数据卷、远程主机任意命令、提权或破坏 Git 历史的结构化能力。
 - `compose_stop` 只停止服务，不执行 `down -v`；第一阶段不提供自动回滚，失败时保留现场供开发者审查日志和状态。
 
+### 部署进度与取消语义
+
+进度不是按计时器伪造的完成比例，而由后端在实际命令边界上报告：每个阶段开始时显示此前已经完成的比例，Docker 命令运行期间持续更新该阶段的已用时间，命令成功后才推进进度。`compose_deploy` 的三个阶段分别是：
+
+1. 校验 Compose 配置；
+2. 构建镜像并启动服务；
+3. 查询容器状态并验证 healthcheck。
+
+Docker CLI 运行在独立进程组中。用户取消后，Windows 使用 `taskkill /T`，macOS/Linux 向进程组发送终止信号；应用随后回收输出管道并返回稳定的 `operation_cancelled` 错误。取消不会自动执行 `compose down` 或回滚已经完成的阶段，因此已创建的镜像或已启动的容器会保留，便于审查现场。
+
 ## 安全模型
 
 ### Web 边界
@@ -284,5 +296,5 @@ python -m pytest
 - 暂不提供任务级 Git worktree 隔离、Git 图形操作栏、PR 托管平台集成、merge/rebase 结构化工具、插件系统或自主网络搜索。
 - DevOps 第一阶段只支持 Docker Compose；不包含 Kubernetes、多主机编排、CI 平台 API、流量切换或自动回滚。
 - 部署验证依据 Compose 容器状态与 healthcheck；没有 healthcheck 的服务只能确认处于 running，不能证明业务接口正确。
-- Compose 长操作有超时，但暂未实现工具内部的实时进度流和细粒度取消。
+- Compose 进度以阶段和已用时间为粒度，不解析 BuildKit 的逐层百分比；取消后已经完成的镜像层或容器状态不会自动回滚。
 - 不同兼容网关对 Chat Completions tool calling 的实现程度可能不同。

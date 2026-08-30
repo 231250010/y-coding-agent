@@ -41,6 +41,23 @@
         </div>
         <button id="rename-current" class="icon-button" type="button" aria-label="对话菜单">•••</button>
       </header>
+      <section id="operation-progress" class="operation-progress" aria-live="polite" hidden>
+        <div class="operation-progress-head">
+          <div class="operation-progress-copy">
+            <span id="operation-kind" class="operation-kind">DEPLOY</span>
+            <strong id="operation-label">准备部署</strong>
+            <span id="operation-meta" class="operation-meta">默认环境</span>
+          </div>
+          <div class="operation-progress-actions">
+            <span id="operation-percent" class="operation-percent">0%</span>
+            <button id="cancel-operation" class="stop-button compact" type="button">取消部署</button>
+          </div>
+        </div>
+        <div id="operation-stages" class="operation-stages" aria-label="部署阶段"></div>
+        <div id="operation-meter" class="operation-meter" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <span id="operation-meter-fill"></span>
+        </div>
+      </section>
       <section id="transcript" class="transcript" aria-live="polite" aria-label="对话消息"></section>
       <section id="empty-state" class="empty-state">
         <span class="empty-mark" aria-hidden="true">⌁</span>

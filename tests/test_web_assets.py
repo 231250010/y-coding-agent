@@ -100,3 +100,17 @@ def test_assistant_markdown_uses_safe_dom_rendering_and_has_rich_styles() -> Non
     assert "innerHTML" not in js
     for selector in [".message-body.markdown", ".md-inline-code", ".md-code-block", ".md-table"]:
         assert selector in css
+
+
+def test_devops_progress_rail_and_cancel_control_are_wired() -> None:
+    html = asset("index.html")
+    javascript = asset("app.js")
+    css = asset("app.css")
+
+    assert 'id="operation-progress"' in html
+    assert 'role="progressbar"' in html
+    assert 'id="cancel-operation"' in html
+    assert "function renderProgress(task)" in javascript
+    assert 'document.querySelector("#cancel-operation").addEventListener("click", stopTask)' in javascript
+    assert ".operation-stages" in css
+    assert "@media (prefers-reduced-motion: reduce)" in css

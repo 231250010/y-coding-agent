@@ -4,6 +4,11 @@ const ui = {
   shell: document.querySelector("#app"), projectList: document.querySelector("#project-list"),
   taskList: document.querySelector("#task-list"), title: document.querySelector("#conversation-title"),
   status: document.querySelector("#run-status"), workspace: document.querySelector("#workspace-button"),
+  progress: document.querySelector("#operation-progress"), progressKind: document.querySelector("#operation-kind"),
+  progressLabel: document.querySelector("#operation-label"), progressMeta: document.querySelector("#operation-meta"),
+  progressPercent: document.querySelector("#operation-percent"), progressStages: document.querySelector("#operation-stages"),
+  progressMeter: document.querySelector("#operation-meter"), progressFill: document.querySelector("#operation-meter-fill"),
+  cancelOperation: document.querySelector("#cancel-operation"),
   transcript: document.querySelector("#transcript"), empty: document.querySelector("#empty-state"),
   composer: document.querySelector("#composer-form"), input: document.querySelector("#message-input"),
   send: document.querySelector("#send-message"), stop: document.querySelector("#stop-task"),
@@ -245,12 +250,57 @@ function messageNode(entry) {
   return article;
 }
 
+const operationLabels = {
+  compose_preflight: "PRE-FLIGHT", compose_status: "STATUS", compose_logs: "LOGS",
+  compose_build: "BUILD", compose_pull: "PULL", compose_deploy: "DEPLOY",
+  compose_verify: "VERIFY", compose_restart: "RESTART", compose_stop: "STOP",
+};
+
+const operationPhases = {
+  compose_preflight: ["连接引擎", "检查版本", "校验配置", "服务清单"],
+  compose_deploy: ["校验配置", "构建启动", "健康验证"],
+};
+
+function renderProgress(task) {
+  const progress = task && task.progress;
+  if (!progress) { ui.progress.hidden = true; return; }
+  ui.progress.hidden = false;
+  ui.progress.dataset.state = progress.state || "running";
+  ui.progressKind.textContent = operationLabels[progress.operation] || "DEVOPS";
+  ui.progressLabel.textContent = progress.label || "执行部署操作";
+  const seconds = Number(progress.elapsed_seconds || 0).toFixed(1);
+  ui.progressMeta.textContent = `${progress.environment || "默认环境"} · ${seconds}s`;
+  const percent = Math.max(0, Math.min(Number(progress.percent || 0), 100));
+  ui.progressPercent.textContent = `${percent}%`;
+  ui.progressMeter.setAttribute("aria-valuenow", String(percent));
+  ui.progressMeter.setAttribute("aria-valuetext", `${progress.label || "部署"}，${percent}%`);
+  ui.progressFill.style.width = `${percent}%`;
+
+  const fallback = Array.from({ length: Math.max(1, Number(progress.total || 1)) }, (_, index) => `步骤 ${index + 1}`);
+  const phases = operationPhases[progress.operation] || fallback;
+  ui.progressStages.style.setProperty("--stage-count", String(phases.length));
+  ui.progressStages.replaceChildren(...phases.map((label, index) => {
+    const number = index + 1;
+    let stageState = number < progress.current ? "completed" : number === progress.current ? "active" : "pending";
+    if (progress.state === "completed") stageState = "completed";
+    if (["failed", "cancelled"].includes(progress.state) && number === progress.current) stageState = progress.state;
+    const stage = element("span", `operation-stage ${stageState}`);
+    stage.append(element("i", "", stageState === "completed" ? "✓" : String(number)), element("b", "", label));
+    return stage;
+  }));
+  const terminal = ["completed", "failed", "cancelled"].includes(progress.state);
+  ui.cancelOperation.hidden = terminal || !task.running;
+  ui.cancelOperation.disabled = progress.state === "cancelling";
+  ui.cancelOperation.textContent = progress.state === "cancelling" ? "正在停止…" : "取消部署";
+}
+
 function renderConversation() {
   const task = currentTask();
   if (!task) {
     ui.title.textContent = "新对话"; ui.status.textContent = "就绪";
     ui.workspace.textContent = "尚未选择工作目录"; ui.empty.hidden = false;
     ui.transcript.replaceChildren(); ui.send.disabled = false; ui.stop.hidden = true;
+    ui.progress.hidden = true;
     ui.workspace.disabled = false; ui.composerWorkspace.disabled = false;
     ui.permissionMode.value = state.settings.approval_mode || "risk";
     ui.permissionMode.disabled = true;
@@ -267,6 +317,7 @@ function renderConversation() {
   ui.permissionMode.value = task.permission_mode || state.settings.approval_mode || "risk";
   ui.permissionMode.disabled = task.running;
   ui.stop.hidden = !task.running;
+  renderProgress(task);
   ui.empty.hidden = task.entries.length > 0;
   const last = task.entries.length ? task.entries[task.entries.length - 1].text : "";
   const key = `${task.id}:${task.entries.length}:${last}:${task.running}`;
@@ -579,6 +630,7 @@ document.querySelector("#open-sidebar").addEventListener("click", openSidebar);
 document.querySelector("#close-sidebar").addEventListener("click", closeSidebar);
 document.querySelector("#sidebar-scrim").addEventListener("click", closeSidebar);
 document.querySelector("#stop-task").addEventListener("click", stopTask);
+document.querySelector("#cancel-operation").addEventListener("click", stopTask);
 document.querySelector("#approve-command").addEventListener("click", () => resolveApproval(true));
 document.querySelector("#deny-command").addEventListener("click", () => resolveApproval(false));
 ui.workspaceForm.addEventListener("submit", submitWorkspace);

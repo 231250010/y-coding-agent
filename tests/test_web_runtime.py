@@ -139,6 +139,60 @@ def test_net_zero_temporary_file_is_removed_from_pending_changes(tmp_path: Path)
     assert task.pending_change_paths == []
 
 
+def test_devops_progress_is_sanitized_exposed_and_marked_cancelling(tmp_path: Path) -> None:
+    runtime = WebRuntime(settings(tmp_path), tmp_path, model_factory=lambda: ScriptedModel([]))
+    task_payload = runtime.new_conversation()
+    task = next(item for item in runtime.tasks if item.id == task_payload["id"])
+    task.running = True
+
+    runtime._handle_agent_event(
+        task.id,
+        "tool_start",
+        {"name": "compose_deploy", "arguments": '{"environment":"staging"}'},
+    )
+    runtime._handle_agent_event(
+        task.id,
+        "tool_progress",
+        {
+            "operation": "compose_deploy",
+            "environment": "staging",
+            "phase": "deploy",
+            "label": "构建并启动服务",
+            "current": 2,
+            "total": 3,
+            "percent": 33,
+            "elapsed_seconds": 4.2,
+            "state": "running",
+        },
+    )
+
+    progress = next(item for item in runtime.snapshot()["tasks"] if item["id"] == task.id)["progress"]
+    assert progress == {
+        "operation": "compose_deploy",
+        "environment": "staging",
+        "phase": "deploy",
+        "label": "构建并启动服务",
+        "current": 2,
+        "total": 3,
+        "percent": 33,
+        "elapsed_seconds": 4.2,
+        "state": "running",
+    }
+
+    runtime.cancel(task.id)
+    assert task.progress is not None
+    assert task.progress["state"] == "cancelling"
+    assert task.progress["label"] == "正在终止 Docker 进程"
+
+    runtime._handle_agent_event(
+        task.id,
+        "tool_end",
+        {"name": "compose_deploy", "ok": False, "error": "operation_cancelled"},
+    )
+    assert task.progress["state"] == "cancelled"
+    assert task.progress["label"] == "部署已停止"
+
+
 
 def test_restored_entries_hide_paths_without_a_remaining_diff(tmp_path: Path) -> None:
     runtime = WebRuntime(settings(tmp_path), tmp_path, model_factory=lambda: ScriptedModel([]))

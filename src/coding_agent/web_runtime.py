@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -63,6 +64,7 @@ class WebTask:
     history: list[dict[str, Any]] = field(default_factory=list)
     running: bool = False
     status: str = "就绪"
+    progress: dict[str, Any] | None = None
     cancel_event: threading.Event = field(default_factory=threading.Event)
     change_tracker: ConversationChangeTracker = field(
         default_factory=lambda: ConversationChangeTracker(None)
@@ -290,6 +292,7 @@ class WebRuntime:
                 task.title = self._display_name(message)[:36]
             task.running = True
             task.status = "正在连接模型"
+            task.progress = None
             task.cancel_event.clear()
             task.pending_change_paths.clear()
             self.current_id = task.id
@@ -308,6 +311,12 @@ class WebRuntime:
             task = self._task(task_id)
             task.cancel_event.set()
             task.status = "正在停止"
+            if task.progress is not None:
+                task.progress = {
+                    **task.progress,
+                    "state": "cancelling",
+                    "label": "正在终止 Docker 进程",
+                }
             for approval in self.approvals.values():
                 if approval.task_id == task.id:
                     approval.approved = False
@@ -452,6 +461,16 @@ class WebRuntime:
             task.pending_change_paths.clear()
             task.running = False
             task.status = "已停止" if kind == "system" else "发生错误"
+            if (
+                task.progress is not None
+                and task.progress.get("state") != "completed"
+                and (kind == "system" or task.progress.get("state") not in {"failed", "cancelled"})
+            ):
+                task.progress = {
+                    **task.progress,
+                    "state": "cancelled" if kind == "system" else "failed",
+                    "label": "部署已停止" if kind == "system" else "部署执行失败",
+                }
             self._save()
 
     def _make_agent(self, task: WebTask) -> CodingAgent:
@@ -482,6 +501,9 @@ class WebRuntime:
                 task.id, command, risk, reason
             ),
             is_cancelled=task.cancel_event.is_set,
+            on_progress=lambda data: self._handle_agent_event(
+                task.id, "tool_progress", data
+            ),
             approval_mode=task.permission_mode,
             change_tracker=task.change_tracker,
         )
@@ -507,6 +529,22 @@ class WebRuntime:
                 task.status = "正在压缩上下文"
             elif name == "tool_start":
                 task.status = f"正在执行 {data.get('name', '工具')}"
+                tool_name = str(data.get("name") or "")
+                if tool_name.startswith("compose_"):
+                    task.progress = {
+                        "operation": tool_name,
+                        "environment": self._tool_environment(data.get("arguments")),
+                        "phase": "queued",
+                        "label": "准备执行",
+                        "current": 0,
+                        "total": 1,
+                        "percent": 0,
+                        "elapsed_seconds": 0.0,
+                        "state": "running",
+                    }
+            elif name == "tool_progress":
+                task.progress = self._progress_payload(data)
+                task.status = str(task.progress["label"])
             elif name == "tool_end":
                 ok = bool(data.get("ok"))
                 detail = str(data.get("output") or data.get("error") or "")
@@ -524,7 +562,17 @@ class WebRuntime:
                         elif path in task.pending_change_paths:
                             task.pending_change_paths.remove(path)
                 task.status = "工具完成，继续分析" if ok else "工具失败，正在恢复"
-            self._save()
+                tool_name = str(data.get("name") or "")
+                if tool_name.startswith("compose_") and task.progress is not None:
+                    cancelled = task.cancel_event.is_set()
+                    task.progress = {
+                        **task.progress,
+                        "state": "cancelled" if cancelled else ("completed" if ok else "failed"),
+                        "percent": 100 if ok else task.progress.get("percent", 0),
+                        "label": "部署已停止" if cancelled else ("部署步骤完成" if ok else "部署步骤失败"),
+                    }
+            if name != "tool_progress":
+                self._save()
 
     def _request_approval(
         self,
@@ -668,12 +716,44 @@ class WebRuntime:
             "title": task.title,
             "running": task.running,
             "status": task.status,
+            "progress": task.progress,
             "workspace": str(project.path) if project else None,
             "entries": [
                 {"kind": entry.kind, "text": entry.text, "change_paths": list(entry.change_paths)}
                 for entry in task.entries
             ],
             "review_path": task.review_path,
+        }
+
+    @staticmethod
+    def _tool_environment(arguments: Any) -> str:
+        if not isinstance(arguments, str):
+            return "默认环境"
+        try:
+            parsed = json.loads(arguments)
+        except (TypeError, ValueError):
+            return "默认环境"
+        value = parsed.get("environment") if isinstance(parsed, dict) else None
+        return value if isinstance(value, str) and value else "默认环境"
+
+    @staticmethod
+    def _progress_payload(data: dict[str, Any]) -> dict[str, Any]:
+        total = max(1, min(int(data.get("total", 1)), 20))
+        current = max(1, min(int(data.get("current", 1)), total))
+        percent = max(0, min(int(data.get("percent", 0)), 100))
+        elapsed = max(0.0, min(float(data.get("elapsed_seconds", 0.0)), 86_400.0))
+        allowed_states = {"running", "completed", "failed", "cancelled", "cancelling"}
+        state = str(data.get("state") or "running")
+        return {
+            "operation": str(data.get("operation") or "compose_operation")[:80],
+            "environment": str(data.get("environment") or "默认环境")[:80],
+            "phase": str(data.get("phase") or "running")[:80],
+            "label": str(data.get("label") or "执行部署操作")[:120],
+            "current": current,
+            "total": total,
+            "percent": percent,
+            "elapsed_seconds": elapsed,
+            "state": state if state in allowed_states else "running",
         }
 
     @staticmethod
