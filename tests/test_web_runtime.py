@@ -11,6 +11,7 @@ import pytest
 from coding_agent.local_settings import LocalSettings
 from coding_agent.model import AssistantResponse, Message, ToolCall
 from coding_agent.web_runtime import ChatEntry, RuntimeConflict, RuntimeNotFound, WebRuntime
+from coding_agent.task_list import TaskListState
 
 
 class ScriptedModel:
@@ -69,6 +70,65 @@ def test_project_and_conversation_are_created_for_existing_directory(tmp_path: P
     assert state["settings"]["api_key_configured"] is True
     assert "test-key" not in json.dumps(state)
     assert "api_key" not in state["settings"]
+
+
+def test_task_list_tool_updates_anchor_and_persists_across_runtime_restart(
+    tmp_path: Path,
+) -> None:
+    arguments = json.dumps(
+        {
+            "objective": "Implement stable planning",
+            "items": [
+                {
+                    "id": "state",
+                    "title": "Persist task state",
+                    "status": "completed",
+                    "blocker": None,
+                },
+                {
+                    "id": "ui",
+                    "title": "Render task progress",
+                    "status": "in_progress",
+                    "blocker": None,
+                },
+            ],
+            "explanation": "State layer is complete; UI is underway.",
+        }
+    )
+    model = ScriptedModel(
+        [
+            AssistantResponse(
+                tool_calls=[ToolCall("plan-1", "update_task_list", arguments)]
+            ),
+            AssistantResponse("done"),
+        ]
+    )
+    runtime = WebRuntime(settings(tmp_path), tmp_path, model_factory=lambda: model)
+    created = runtime.new_conversation()
+    runtime.send_message(created["id"], "Implement the feature")
+    finished = wait_until_idle(runtime, created["id"])
+
+    assert finished["task_list"]["objective"] == "Implement stable planning"
+    assert finished["task_list"]["completed"] == 1
+    anchors = [
+        message
+        for message in runtime.tasks[0].history
+        if TaskListState.is_anchor(message)
+    ]
+    assert len(anchors) == 1
+    first_user = next(
+        index
+        for index, message in enumerate(runtime.tasks[0].history)
+        if message.get("role") == "user"
+    )
+    assert runtime.tasks[0].history.index(anchors[0]) < first_user
+
+    restored = WebRuntime(
+        settings(tmp_path), tmp_path, model_factory=lambda: ScriptedModel([])
+    )
+    restored_task = restored.snapshot()["tasks"][0]
+    assert restored_task["task_list"]["objective"] == "Implement stable planning"
+    assert restored_task["task_list"]["items"][1]["status"] == "in_progress"
 
 
 def test_project_rejects_missing_directory(tmp_path: Path) -> None:

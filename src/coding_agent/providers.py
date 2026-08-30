@@ -7,6 +7,7 @@ from typing import Any, Callable, Protocol, TYPE_CHECKING
 from .changes import ConversationChangeTracker
 
 if TYPE_CHECKING:
+    from .task_list import TaskListState
     from .tools import ToolResult
 
 
@@ -63,6 +64,8 @@ def build_default_tool_provider(
     devops_release_identity_workspace: Path | None = None,
     approval_mode: str = "risk",
     change_tracker: ConversationChangeTracker | None = None,
+    task_list_state: TaskListState | None = None,
+    on_task_list_update: Callable[[dict[str, Any]], None] | None = None,
 ) -> ToolProvider:
     """Compose file/command, Git, and Docker Compose DevOps tools."""
     from .git_service import GitService
@@ -72,6 +75,7 @@ def build_default_tool_provider(
     from .devops_service import DevOpsService
     from .devops_tools import DevOpsToolProvider
     from .tools import ToolRegistry
+    from .task_list import TaskListState, TaskListToolProvider
 
     local = ToolRegistry(
         workspace,
@@ -80,8 +84,11 @@ def build_default_tool_provider(
         approval_mode=approval_mode,
         change_tracker=change_tracker,
     )
+    planning = TaskListToolProvider(
+        task_list_state or TaskListState(), on_update=on_task_list_update
+    )
     if workspace is None:
-        return local
+        return CompositeToolProvider([local, planning])
     git = GitToolProvider(
         GitService(workspace),
         approver=approver,
@@ -103,4 +110,4 @@ def build_default_tool_provider(
         approval_mode=approval_mode,
         change_tracker=change_tracker,
     )
-    return CompositeToolProvider([local, git, actions, devops])
+    return CompositeToolProvider([local, planning, git, actions, devops])

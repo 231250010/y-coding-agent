@@ -17,6 +17,7 @@ from .permissions import PERMISSION_MODES, normalize_permission_mode
 from .prompts import PROJECTLESS_SYSTEM_PROMPT, SYSTEM_PROMPT
 from .safety import RiskLevel
 from .session_store import SessionStore
+from .task_list import TaskListState
 from .providers import build_default_tool_provider
 
 
@@ -77,6 +78,7 @@ class WebTask:
     worktree_base_branch: str | None = None
     worktree_base_commit: str | None = None
     workspace_changing: bool = False
+    task_list: TaskListState = field(default_factory=TaskListState)
 
 
 ModelFactory = Callable[[], ChatModel]
@@ -613,7 +615,7 @@ class WebRuntime:
                 task = self._task(task_id)
                 agent = self._make_agent(task)
                 if task.history:
-                    agent.history = [agent.history[0], *task.history[1:]]
+                    agent.restore_history(task.history)
             result = agent.run(message)
             with self.lock:
                 task = self._task(task_id)
@@ -701,6 +703,10 @@ class WebRuntime:
             devops_release_identity_workspace=project.path if project else None,
             approval_mode=task.permission_mode,
             change_tracker=task.change_tracker,
+            task_list_state=task.task_list,
+            on_task_list_update=lambda snapshot: self._handle_task_list_update(
+                task.id, snapshot
+            ),
         )
         return CodingAgent(
             model,
@@ -710,7 +716,16 @@ class WebRuntime:
             on_event=lambda name, data: self._handle_agent_event(task.id, name, data),
             is_cancelled=task.cancel_event.is_set,
             system_prompt=SYSTEM_PROMPT if workspace else PROJECTLESS_SYSTEM_PROMPT,
+            task_list=task.task_list,
         )
+
+    def _handle_task_list_update(
+        self, task_id: str, _snapshot: dict[str, Any]
+    ) -> None:
+        with self.lock:
+            task = self._task(task_id)
+            task.status = "任务清单已更新"
+            self._save()
 
     def _handle_agent_event(self, task_id: str, name: str, data: dict[str, Any]) -> None:
         with self.lock:
@@ -865,6 +880,7 @@ class WebRuntime:
                     if isinstance(stored_worktree.get("base_commit"), str)
                     else None
                 ),
+                task_list=TaskListState.from_storage(raw.get("task_list")),
             )
             if stored_worktree and worktree_path is None:
                 task.entries.append(
@@ -878,7 +894,7 @@ class WebRuntime:
     def _save(self) -> None:
         self.store.save(
             {
-                "version": 4,
+                "version": 5,
                 "current_id": self.current_id,
                 "projects": [self._project_payload(project) for project in self.projects],
                 "tasks": [
@@ -897,6 +913,7 @@ class WebRuntime:
                         "review_path": task.review_path,
                         "pending_change_paths": list(task.pending_change_paths),
                         "worktree": self._worktree_payload(task),
+                        "task_list": self._task_list_storage(task),
                     }
                     for task in self.tasks
                 ],
@@ -947,6 +964,7 @@ class WebRuntime:
             "source_workspace": str(project.path) if project else None,
             "worktree": self._worktree_payload(task),
             "workspace_changing": task.workspace_changing,
+            "task_list": task.task_list.snapshot(),
             "entries": [
                 {"kind": entry.kind, "text": entry.text, "change_paths": list(entry.change_paths)}
                 for entry in task.entries
@@ -977,6 +995,14 @@ class WebRuntime:
             "branch": task.worktree_branch,
             "base_branch": task.worktree_base_branch,
             "base_commit": task.worktree_base_commit,
+        }
+
+    @staticmethod
+    def _task_list_storage(task: WebTask) -> dict[str, Any]:
+        snapshot = task.task_list.snapshot()
+        return {
+            "objective": snapshot["objective"],
+            "items": snapshot["items"],
         }
 
     @staticmethod

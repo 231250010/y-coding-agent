@@ -8,6 +8,7 @@ from .context import ContextManager
 from .model import AssistantResponse, ChatModel, Message, ModelError
 from .providers import ToolProvider
 from .prompts import SUMMARY_PROMPT, SYSTEM_PROMPT
+from .task_list import TaskListState
 from .tools import ToolResult
 
 
@@ -33,6 +34,7 @@ class CodingAgent:
         on_event: EventCallback | None = None,
         is_cancelled: Callable[[], bool] | None = None,
         system_prompt: str = SYSTEM_PROMPT,
+        task_list: TaskListState | None = None,
     ) -> None:
         self.model = model
         self.tools = tools
@@ -41,20 +43,35 @@ class CodingAgent:
         self.on_event = on_event or (lambda _name, _data: None)
         self.is_cancelled = is_cancelled or (lambda: False)
         self.system_prompt = system_prompt
+        self.task_list = task_list or TaskListState()
         self.history: list[Message] = [{"role": "system", "content": system_prompt}]
 
     def clear(self) -> None:
+        self.task_list.replace("", [])
         self.history = [{"role": "system", "content": self.system_prompt}]
+
+    def restore_history(self, messages: list[Message]) -> None:
+        restored = [
+            dict(message)
+            for message in messages
+            if not TaskListState.is_anchor(message)
+        ]
+        if not restored or restored[0].get("role") != "system":
+            restored.insert(0, {"role": "system", "content": self.system_prompt})
+        self.history = restored
+        self._sync_task_list_anchor()
 
     def run(self, task: str) -> str:
         if not task.strip():
             raise ValueError("任务不能为空")
+        self._sync_task_list_anchor()
         self.history.append({"role": "user", "content": task})
         last_error: str | None = None
         repeated_errors = 0
 
         for step in range(1, self.max_steps + 1):
             self._check_cancelled()
+            self._sync_task_list_anchor()
             self.on_event("model_start", {"step": step, "max_steps": self.max_steps})
             self.history = self.context.compact(self.history, self._summarize)
             response = self.model.complete(self.history, self.tools.schemas())
@@ -99,6 +116,16 @@ class CodingAgent:
                         raise AgentStopped(f"连续三次发生相同工具错误，已停止: {result.error}")
 
         raise AgentStopped(f"达到最大步骤数 {self.max_steps}，任务未正常结束")
+
+    def _sync_task_list_anchor(self) -> None:
+        history = [
+            message for message in self.history if not TaskListState.is_anchor(message)
+        ]
+        snapshot = self.task_list.snapshot()
+        if snapshot["objective"] or snapshot["items"]:
+            insertion = 1 if history and history[0].get("role") == "system" else 0
+            history.insert(insertion, self.task_list.system_message())
+        self.history = history
 
     def _check_cancelled(self) -> None:
         if self.is_cancelled():

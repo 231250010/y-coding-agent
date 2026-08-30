@@ -29,6 +29,7 @@ HTTP 服务固定监听 `127.0.0.1`，浏览器负责项目、对话、审批、
 | `release_store.py` | 按工作区隔离的发布版本、回滚计划与审计事件原子存储 |
 | `changes.py` | 对话级文件快照和累计 Diff |
 | `context.py` | 上下文估算、摘要与保守裁剪 |
+| `task_list.py` | 任务清单校验、结构化更新工具和 system 状态投影 |
 | `session_store.py` | 本机会话原子持久化与兼容加载 |
 | `local_settings.py` | Git 忽略的本机模型配置 |
 | `directory_picker.py` | 为网页请求启动隔离的原生目录选择弹窗 |
@@ -50,6 +51,7 @@ CodingAgent
   ├── ChatModel
   └── CompositeToolProvider
         ├── ToolRegistry (files / command)
+        ├── TaskListToolProvider -> TaskListState
         ├── GitToolProvider -> GitService
         └── DevOpsToolProvider -> DevOpsService -> Docker CLI / Context
 ```
@@ -67,6 +69,8 @@ CodingAgent
 ## 对话与持久化
 
 每个对话独立保存模型协议历史、网页展示条目、权限模式、工作目录关联、取消事件、运行状态和累计文件 Diff。
+
+多阶段目标使用 `TaskListState` 独立保存，不依赖模型消息历史。`update_task_list` 采用完整快照语义并原子校验目标、稳定 ID、状态和阻塞原因；持久化失败时回滚内存状态。Agent 在每次模型调用前删除旧投影并插入唯一的最新 system 锚点，位置在首条用户消息之前。上下文压缩把该锚点视为稳定前言，只滚动摘要普通历史；网页则从同一状态对象渲染任务飞行计划，避免出现两份进度来源。
 
 项目、对话和 Diff 状态写入 `.coding-agent/sessions.json`。存储层先写临时同级文件再原子替换；无效或旧版本数据在加载时经过校验与迁移，不影响 Web 服务启动。
 

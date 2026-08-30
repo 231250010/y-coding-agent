@@ -54,6 +54,7 @@ def test_default_provider_adds_git_and_devops_tools_for_selected_workspace(tmp_p
     assert "github_actions_status" in names
     assert "github_actions_failed_logs" in names
     assert "github_actions_rerun_failed" in names
+    assert "update_task_list" in names
     assert "devops_inspect" in names
     assert "compose_deploy" in names
     assert "compose_verify" in names
@@ -63,8 +64,10 @@ def test_default_provider_adds_git_and_devops_tools_for_selected_workspace(tmp_p
     assert getattr(tools, "change_tracker", None) is tracker
 
 
-def test_default_provider_keeps_projectless_conversations_tool_free() -> None:
+def test_default_provider_gives_projectless_conversations_only_task_state_tool() -> None:
     tools = build_default_tool_provider(None)
 
-    assert tools.schemas() == []
-    assert tools.execute("git_status", {}).error == "当前对话尚未选择工作目录"
+    assert [schema["function"]["name"] for schema in tools.schemas()] == [
+        "update_task_list"
+    ]
+    assert tools.execute("git_status", {}).error == "未知工具: git_status"

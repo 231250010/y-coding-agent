@@ -153,3 +153,16 @@ def test_worktree_isolation_requires_explicit_dialog_confirmation() -> None:
     assert "/worktree`" in javascript
     assert ".worktree-tool.active" in css
     assert ".worktree-preview" in css
+
+
+def test_task_flight_plan_renders_structured_progress_and_blockers() -> None:
+    html = asset("index.html")
+    javascript = asset("app.js")
+    css = asset("app.css")
+
+    assert 'id="task-plan"' in html
+    assert 'id="task-plan-items"' in html
+    assert "function renderTaskPlan(task)" in javascript
+    assert 'blocked: "阻塞"' in javascript
+    assert ".task-plan-item.in_progress" in css
+    assert ".task-plan-item.blocked" in css

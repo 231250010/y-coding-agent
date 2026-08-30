@@ -9,6 +9,9 @@ const ui = {
   progressPercent: document.querySelector("#operation-percent"), progressStages: document.querySelector("#operation-stages"),
   progressMeter: document.querySelector("#operation-meter"), progressFill: document.querySelector("#operation-meter-fill"),
   cancelOperation: document.querySelector("#cancel-operation"),
+  taskPlan: document.querySelector("#task-plan"), taskPlanObjective: document.querySelector("#task-plan-objective"),
+  taskPlanCompleted: document.querySelector("#task-plan-completed"), taskPlanBlocked: document.querySelector("#task-plan-blocked"),
+  taskPlanMeterFill: document.querySelector("#task-plan-meter-fill"), taskPlanItems: document.querySelector("#task-plan-items"),
   transcript: document.querySelector("#transcript"), empty: document.querySelector("#empty-state"),
   composer: document.querySelector("#composer-form"), input: document.querySelector("#message-input"),
   send: document.querySelector("#send-message"), stop: document.querySelector("#stop-task"),
@@ -306,6 +309,27 @@ function renderProgress(task) {
   ui.cancelOperation.textContent = progress.state === "cancelling" ? "正在停止…" : "取消部署";
 }
 
+function renderTaskPlan(task) {
+  const plan = task && task.task_list;
+  if (!plan || !plan.total) { ui.taskPlan.hidden = true; return; }
+  ui.taskPlan.hidden = false;
+  ui.taskPlanObjective.textContent = plan.objective;
+  ui.taskPlanCompleted.textContent = `${plan.completed}/${plan.total}`;
+  ui.taskPlanBlocked.hidden = !plan.blocked;
+  ui.taskPlanBlocked.textContent = plan.blocked ? `${plan.blocked} 项阻塞` : "";
+  ui.taskPlanMeterFill.style.width = `${Math.round((plan.completed / plan.total) * 100)}%`;
+  const labels = { pending: "待处理", in_progress: "进行中", completed: "已完成", blocked: "阻塞" };
+  ui.taskPlanItems.replaceChildren(...plan.items.map((item) => {
+    const row = element("div", `task-plan-item ${item.status}`);
+    row.append(element("i", "task-plan-marker", item.status === "completed" ? "✓" : ""));
+    const copy = element("div", "task-plan-copy");
+    copy.append(element("strong", "", item.title));
+    if (item.blocker) copy.append(element("small", "", item.blocker));
+    row.append(copy, element("span", "task-plan-status", labels[item.status] || item.status));
+    return row;
+  }));
+}
+
 function renderConversation() {
   const task = currentTask();
   if (!task) {
@@ -313,6 +337,7 @@ function renderConversation() {
     ui.workspace.textContent = "尚未选择工作目录"; ui.empty.hidden = false;
     ui.transcript.replaceChildren(); ui.send.disabled = false; ui.stop.hidden = true;
     ui.progress.hidden = true;
+    ui.taskPlan.hidden = true;
     ui.workspace.disabled = false; ui.composerWorkspace.disabled = false;
     ui.permissionMode.value = state.settings.approval_mode || "risk";
     ui.permissionMode.disabled = true;
@@ -337,6 +362,7 @@ function renderConversation() {
     ? `已隔离到 ${task.worktree.workspace}，主工作区不会自动合并`
     : "为当前对话创建独立 Git worktree";
   ui.stop.hidden = !task.running;
+  renderTaskPlan(task);
   renderProgress(task);
   ui.empty.hidden = task.entries.length > 0;
   const last = task.entries.length ? task.entries[task.entries.length - 1].text : "";
