@@ -19,7 +19,7 @@ HTTP 服务固定监听 `127.0.0.1`，浏览器负责项目、对话、审批、
 | `web_assets/` | 原生 HTML、CSS、JavaScript 网页界面 |
 | `agent.py` | 模型—工具循环、事件、重复错误和步数终止 |
 | `execution_state.py` | 修改版本、验证账本、完成证据与结果状态 |
-| `model.py` | OpenAI Chat Completions 基础客户端适配 |
+| `model.py` | OpenAI Chat Completions 基础客户端适配、流式 tool call 与 DeepSeek `reasoning_content` 重组 |
 | `providers.py` | 多工具提供者组合与默认工具集构建 |
 | `tools.py` | 文件、搜索、编辑与通用命令工具 |
 | `skills.py` | `SKILL.md` 发现、描述目录和按需指令加载 |
@@ -68,7 +68,7 @@ CodingAgent
 
 1. 浏览器向 `/api/conversations/{id}/messages` 提交用户消息。
 2. `WebRuntime` 校验对话状态并创建后台 Agent 任务。
-3. `CodingAgent` 在预算阈值处把旧滚动摘要和新淘汰轮次合并为唯一的新摘要，再以流式 Chat Completions 调用模型并附带本地工具 Schema。文本 delta 立即进入临时展示状态；tool call delta 按 index 重组 ID、名称和参数，完成后才执行。摘要请求仍使用非流式调用，不把摘要正文展示给用户。
+3. `CodingAgent` 在预算阈值处把旧滚动摘要和新淘汰轮次合并为唯一的新摘要，再以流式 Chat Completions 调用模型并附带本地工具 Schema。文本 delta 立即进入临时展示状态；tool call delta 按 index 重组 ID、名称和参数，DeepSeek thinking 的 `reasoning_content` 单独重组但不进入可见文本。包含工具调用的 assistant 消息会原样保存该字段，并在工具结果后的下一轮请求中回传。摘要请求仍使用非流式调用，不把摘要正文展示给用户。
 
 上下文裁剪采用软、硬两级预算。超过软阈值时只滚动摘要旧完整轮次，旧工具输出在进入摘要请求前以头尾保留方式限长；最近两轮不因软阈值截断。只有摘要后的消息仍超过硬上限时，才按时间从旧到新缩减近期工具结果，并同时保留开头、结尾和省略量，尽量保住命令尾部的错误与测试总结。
 4. 模型返回工具调用时，组合提供者按工具名路由。Skill 平时只把名称与描述放进菜单，命中 `load_skill` 时才读取完整 `SKILL.md`，包内参考文件再经 `read_skill_resource` 二次披露。MCP Server 在首次生成 Schema 时完成 initialize、initialized 和 capability 检查；tools/list 的远端名称映射成唯一的 `mcp_<server>_<tool>`，resources/prompts capability 则启用只读桥接工具。stdio 读取线程和可选 HTTP GET SSE 监听把响应、通知与反向请求分流；tools/list_changed 使提供器原子重建远端工具菜单。连续且由本地提供者显式声明为只读的调用进入最多四线程的并行批次；未声明、参数无效、会改变状态或共享 MCP 连接的调用形成串行屏障。并行结果始终按原始 tool call 顺序写回，保持模型协议确定性。

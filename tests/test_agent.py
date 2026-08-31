@@ -92,6 +92,48 @@ def test_single_tool_round_trip(tmp_path: Path) -> None:
     assert second_request[-1]["tool_call_id"] == "c1"
 
 
+def test_deepseek_reasoning_content_is_replayed_with_assistant_tool_call(
+    tmp_path: Path,
+) -> None:
+    responses = [
+        AssistantResponse(
+            tool_calls=[call("c1", "read_file", {"path": "a.txt"})],
+            finish_reason="tool_calls",
+            reasoning_content="需要先读取目标文件",
+        ),
+        AssistantResponse("读取完成"),
+    ]
+    (tmp_path / "a.txt").write_text("hello", encoding="utf-8")
+    agent, model = make_agent(tmp_path, responses)
+
+    assert agent.run("读取文件") == "读取完成"
+    assistant = model.requests[1][0][-2]
+    assert assistant["role"] == "assistant"
+    assert assistant["reasoning_content"] == "需要先读取目标文件"
+    assert assistant["tool_calls"][0]["id"] == "c1"
+
+
+def test_final_reasoning_content_is_not_replayed_into_a_later_user_turn(
+    tmp_path: Path,
+) -> None:
+    agent, model = make_agent(
+        tmp_path,
+        [
+            AssistantResponse("第一轮完成", reasoning_content="第一轮内部分析"),
+            AssistantResponse("第二轮完成"),
+        ],
+    )
+
+    assert agent.run("第一轮") == "第一轮完成"
+    assert agent.run("第二轮") == "第二轮完成"
+    previous_assistant = next(
+        message
+        for message in model.requests[1][0]
+        if message.get("role") == "assistant"
+    )
+    assert "reasoning_content" not in previous_assistant
+
+
 def test_tool_end_exposes_local_changes_without_sending_them_to_model(tmp_path: Path) -> None:
     events: list[tuple[str, dict[str, Any]]] = []
     tracker = ConversationChangeTracker(tmp_path)

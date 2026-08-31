@@ -30,8 +30,17 @@ def fake_model(outcomes: list[object], sleeps: list[int] | None = None) -> tuple
     return model, completions
 
 
-def response(*, content: str | None = "done", calls: list[object] | None = None) -> object:
-    message = SimpleNamespace(content=content, tool_calls=calls or [])
+def response(
+    *,
+    content: str | None = "done",
+    calls: list[object] | None = None,
+    reasoning_content: str | None = None,
+) -> object:
+    message = SimpleNamespace(
+        content=content,
+        tool_calls=calls or [],
+        reasoning_content=reasoning_content,
+    )
     return SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason="stop")])
 
 
@@ -40,8 +49,13 @@ def chunk(
     content: str | None = None,
     calls: list[object] | None = None,
     finish_reason: str | None = None,
+    reasoning_content: str | None = None,
 ) -> object:
-    delta = SimpleNamespace(content=content, tool_calls=calls or [])
+    delta = SimpleNamespace(
+        content=content,
+        tool_calls=calls or [],
+        reasoning_content=reasoning_content,
+    )
     return SimpleNamespace(
         choices=[SimpleNamespace(delta=delta, finish_reason=finish_reason)]
     )
@@ -59,6 +73,32 @@ def test_adapter_parses_function_tool_calls() -> None:
     assert result.tool_calls[0].name == "read_file"
     assert completions.requests[0]["model"] == "test-model"
     assert completions.requests[0]["tool_choice"] == "auto"
+
+
+def test_adapter_preserves_deepseek_reasoning_content() -> None:
+    model, _ = fake_model(
+        [response(content=None, reasoning_content="分析后决定调用工具")]
+    )
+
+    result = model.complete([{"role": "user", "content": "分析"}])
+
+    assert result.reasoning_content == "分析后决定调用工具"
+
+
+def test_adapter_reads_reasoning_content_from_sdk_model_extra() -> None:
+    message = SimpleNamespace(
+        content=None,
+        tool_calls=[],
+        model_extra={"reasoning_content": "兼容字段"},
+    )
+    raw_response = SimpleNamespace(
+        choices=[SimpleNamespace(message=message, finish_reason="tool_calls")]
+    )
+    model, _ = fake_model([raw_response])
+
+    assert model.complete([{"role": "user", "content": "分析"}]).reasoning_content == (
+        "兼容字段"
+    )
 
 
 def test_adapter_omits_tools_for_summary_requests() -> None:
@@ -98,7 +138,8 @@ def test_streaming_adapter_emits_text_and_reassembles_tool_calls() -> None:
     )
     model, completions = fake_model(
         [[
-            chunk(content="正在"),
+            chunk(reasoning_content="先分析"),
+            chunk(content="正在", reasoning_content="再决定"),
             chunk(content="读取", calls=[call_start]),
             chunk(calls=[call_end], finish_reason="tool_calls"),
         ]]
@@ -116,6 +157,7 @@ def test_streaming_adapter_emits_text_and_reassembles_tool_calls() -> None:
     assert result.tool_calls[0].id == "call-1"
     assert result.tool_calls[0].name == "read_file"
     assert result.tool_calls[0].arguments == '{"path":"a.py"}'
+    assert result.reasoning_content == "先分析再决定"
     assert "".join(deltas) == "正在读取"
     assert completions.requests[0]["stream"] is True
 

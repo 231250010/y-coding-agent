@@ -38,6 +38,7 @@ class AssistantResponse:
     content: str | None = None
     tool_calls: Sequence[ToolCall] = field(default_factory=tuple)
     finish_reason: str | None = None
+    reasoning_content: str | None = None
 
 
 class ModelError(RuntimeError):
@@ -126,6 +127,9 @@ class OpenAIChatModel:
                     content=message.content,
                     tool_calls=calls,
                     finish_reason=choice.finish_reason,
+                    reasoning_content=self._optional_string_field(
+                        message, "reasoning_content"
+                    ),
                 )
             except (AuthenticationError, BadRequestError) as exc:
                 raise ModelError(f"模型请求不可重试: {exc}") from exc
@@ -160,6 +164,7 @@ class OpenAIChatModel:
             try:
                 stream = self._client.chat.completions.create(**request)
                 content_parts: list[str] = []
+                reasoning_parts: list[str] = []
                 tool_parts: dict[int, dict[str, str]] = {}
                 finish_reason: str | None = None
                 for chunk in stream:
@@ -174,6 +179,11 @@ class OpenAIChatModel:
                     content = getattr(delta, "content", None) if delta else None
                     if isinstance(content, str) and content:
                         content_parts.append(content)
+                    reasoning = self._optional_string_field(
+                        delta, "reasoning_content"
+                    )
+                    if reasoning:
+                        reasoning_parts.append(reasoning)
                     self._emit_delta(on_delta, content if isinstance(content, str) else "")
                     for item in (getattr(delta, "tool_calls", None) or []):
                         index = int(getattr(item, "index", 0) or 0)
@@ -210,6 +220,7 @@ class OpenAIChatModel:
                     content="".join(content_parts) or None,
                     tool_calls=tuple(calls),
                     finish_reason=finish_reason,
+                    reasoning_content="".join(reasoning_parts) or None,
                 )
             except _StreamCallbackAbort as exc:
                 raise exc.original
@@ -244,6 +255,20 @@ class OpenAIChatModel:
             callback(content)
         except Exception as exc:
             raise _StreamCallbackAbort(exc) from exc
+
+    @staticmethod
+    def _optional_string_field(value: Any, name: str) -> str | None:
+        """Read an OpenAI-compatible extension field without SDK coupling."""
+        if value is None:
+            return None
+        if isinstance(value, dict):
+            candidate = value.get(name)
+        else:
+            candidate = getattr(value, name, None)
+            if candidate is None:
+                model_extra = getattr(value, "model_extra", None)
+                candidate = model_extra.get(name) if isinstance(model_extra, dict) else None
+        return candidate if isinstance(candidate, str) else None
 
 
 class _StreamCallbackAbort(Exception):
