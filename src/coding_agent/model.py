@@ -78,12 +78,33 @@ class OpenAIChatModel:
         messages: Sequence[Message],
         tools: Sequence[dict[str, Any]] | None = None,
     ) -> AssistantResponse:
+        return self._complete(messages, tools, max_tokens=None)
+
+    def complete_with_max_tokens(
+        self,
+        messages: Sequence[Message],
+        max_tokens: int,
+    ) -> AssistantResponse:
+        """Make an isolated, tool-free request with a hard output-token limit."""
+        if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens < 1:
+            raise ValueError("max_tokens 必须是正整数")
+        return self._complete(messages, None, max_tokens=max_tokens)
+
+    def _complete(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[dict[str, Any]] | None,
+        *,
+        max_tokens: int | None,
+    ) -> AssistantResponse:
         request: dict[str, Any] = {
             "model": self.model,
             "messages": list(messages),
         }
         if tools:
             request.update({"tools": list(tools), "tool_choice": "auto"})
+        if max_tokens is not None:
+            request["max_tokens"] = max_tokens
 
         for attempt in range(self.max_retries + 1):
             try:

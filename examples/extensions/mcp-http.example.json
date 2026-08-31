@@ -1,0 +1,13 @@
+{
+  "servers": {
+    "remote": {
+      "transport": "streamable_http",
+      "url": "https://mcp.example.invalid/endpoint",
+      "headers": {
+        "Authorization": "REMOTE_MCP_AUTH"
+      },
+      "listen": true,
+      "timeout_seconds": 15
+    }
+  }
+}

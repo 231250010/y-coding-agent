@@ -1,6 +1,6 @@
 # Coding Agent：从零实现的本地编程智能体
 
-这是一个个人独立设计并实现、面向开发运维部署一体化的编程智能体。它在本机启动网页工作台，通过支持 OpenAI Chat Completions tool calling 的模型自主读取与修改工作区文件、执行命令、操作 Git，并对 Docker Compose 应用执行部署前检查、构建部署、状态验证、日志读取和服务运维，直到完成任务或触发安全终止条件。
+这是一个个人独立设计并实现、面向开发运维部署一体化的编程智能体。它在本机启动网页工作台，通过支持 OpenAI Chat Completions tool calling 的模型自主读取与修改工作区文件、执行命令、操作 Git，并对 Docker Compose 应用执行部署前检查、构建部署、状态验证、日志读取和服务运维，直到完成任务或触发安全终止条件。它还支持携带参考资源的本地 `SKILL.md` 渐进式披露，以及不依赖 MCP SDK 的 stdio / Streamable HTTP MCP 接入。
 
 浏览器只承担展示和输入。对话历史、上下文压缩、工具协议、本地调度、模型输出解析、循环控制、安全策略和错误恢复均由本仓库代码实现。
 
@@ -13,6 +13,7 @@
 - 不使用 `openai-agents`、OpenAI Agents SDK、LangChain、LlamaIndex、AutoGen、CrewAI、Claude Agent SDK 或其他 Agent 框架。
 - 不在 Claude Code、Codex、OpenCode 等现成 Agent 产品上封装界面。
 - 不使用 Code Interpreter、Files API、File Search、Computer Use 等服务端托管工具。
+- Skill 发现、MCP JSON-RPC 生命周期、工具发现、调用路由、审批和进程回收均由本仓库实现，不使用 MCP SDK。
 - 文件访问、命令执行、参数验证、tool call 回传、上下文管理和循环终止全部发生在本机。
 
 网页服务也没有引入 Web 框架：它使用 Python 标准库 `ThreadingHTTPServer`，前端使用原生 HTML、CSS 和 JavaScript。运行依赖为基础客户端 `openai`，以及为系统 SOCKS 代理提供传输支持的 `httpx[socks]`；它们都不承担 Agent 编排职责。
@@ -28,7 +29,7 @@
    ▼
 本地 Agent 循环 ──────── 上下文预算与自动摘要
    │
-   ├─ 调用 Chat Completions（附本地工具 JSON Schema）
+   ├─ 调用 Chat Completions（附本地 / Skill / MCP 工具 JSON Schema）
    │
    ├─ 模型直接回答 ───────────────► 结束
    │
@@ -38,7 +39,7 @@
       参数校验与安全策略
           │
           ▼
-      本地工具执行
+      本地工具执行或 MCP stdio / HTTP JSON-RPC 调用
           │
           ▼
       tool_call_id 对应的 tool 消息
@@ -51,6 +52,8 @@
 - `agent.py`：自主循环、模型输出解析、工具结果回传和终止条件。
 - `model.py`：`openai` 基础客户端的薄适配层，不包含 Agent 逻辑。
 - `tools.py`：文件、搜索、批量编辑和受控命令工具的 Schema、校验与执行。
+- `skills.py`：项目级/本机级 Skill 发现、描述菜单、`SKILL.md` 和包内资源按需加载。
+- `mcp.py`：MCP 配置、stdio/Streamable HTTP 传输、JSON-RPC 生命周期、tools/resources/prompts 和脱敏。
 - `git_service.py` / `git_tools.py`：结构化 Git 控制面和审批规则。
 - `worktree_service.py`：为网页对话创建任务级 Git 分支和隔离工作区。
 - `github_actions_service.py` / `github_actions_tools.py`：基于本机 `gh` CLI 的 CI 状态、失败日志和重跑控制面。
@@ -96,6 +99,89 @@ python -m pip install -e ".[dev]"
 也可以在网页的“模型与运行设置”中保存本机配置。页面永远不会把已经配置的 API Key 返回给浏览器；新 Key 只有在明确勾选“保存到本地配置”后才会写入 `.coding-agent/config.json`。
 
 `.coding-agent/`、`.env` 和虚拟环境均已加入 `.gitignore`。真实凭据不得写入源码、README、测试数据、日志或提交记录。
+
+## Skill 与 MCP 扩展
+
+### Skill：描述常驻，正文按需加载
+
+Skill 放在下列任一路径，每个一级子目录包含一个 UTF-8 `SKILL.md`：
+
+```text
+<Coding Agent 设置目录>/.coding-agent/skills/<skill-name>/SKILL.md
+<当前项目>/.coding-agent/skills/<skill-name>/SKILL.md
+```
+
+项目级同名 Skill 覆盖本机级 Skill。文件必须含有简单 frontmatter：
+
+```markdown
+---
+name: test-review
+description: 修改 Python 代码后运行相关测试并根据失败继续修复。
+---
+
+这里写完整工作方法。
+```
+
+模型平时只看到名称和 `description`。任务匹配时调用 `load_skill`，完整正文才作为 `tool` 结果进入本轮上下文。Skill 目录中的其他文件只列出相对路径；需要时再用 `read_skill_resource` 读取单个 UTF-8 文本。绝对路径、`..`、越界符号链接、二进制文件和超限内容会被拒绝。正文和资源不能覆盖 system prompt、用户目标、审批或路径规则。
+
+Skill 可以在 `scripts/` 中附带 `.py`，以及当前平台支持的 `.ps1` 或 `.sh`。运行时强制 Agent 先用 `read_skill_resource` 读取完整脚本并记录 SHA-256，再通过 `run_skill_script` 使用固定解释器和参数数组执行；内容在审查或审批后变化会拒绝运行，必须重新审查。不支持任意可执行文件或 shell 命令字符串。执行始终要求人工确认，不受 `full` 模式影响，审批内容包含脚本摘要；工作目录固定为当前工作区，最多 300 秒，只继承最小系统环境且不继承 `CODING_AGENT_API_KEY`，输出会脱敏、截断，文件修改进入会话 Diff。这个边界是应用层约束，不是操作系统沙箱：获批脚本仍拥有当前用户进程本身的系统权限，因此只应安装和执行可信 Skill。可复制 [示例 Skill](examples/extensions/skills/test-review/SKILL.md) 到项目的 `.coding-agent/skills/test-review/SKILL.md` 进行演示。
+
+### MCP：原生 stdio 与 Streamable HTTP JSON-RPC
+
+在本机设置目录或当前项目创建 `.coding-agent/mcp.json`。两个文件同时存在时，项目配置中的同名 Server 覆盖本机配置。配置示例：
+
+```json
+{
+  "servers": {
+    "demo": {
+      "command": "python",
+      "args": ["examples/extensions/mcp_demo_server.py"],
+      "cwd": ".",
+      "env": ["DEMO_TOKEN"],
+      "env_map": {"SERVER_TOKEN": "DEMO_TOKEN"},
+      "timeout_seconds": 10
+    }
+  }
+}
+```
+
+- `command` 和 `args` 以参数数组、`shell=False` 启动；`cwd` 必须位于当前工作区。
+- `env` 只写需要同名传递的环境变量名称；`env_map` 把 Server 需要的变量名映射到来源变量名。配置格式不接受字面凭据值。
+- MCP 子进程只继承启动所需的最小系统环境和显式声明的变量，不会默认继承 `CODING_AGENT_API_KEY`；显式变量在 stderr、错误和工具结果中会被替换为 `[REDACTED]`。
+- 握手后，远端工具以 `mcp_<server>_<tool>` 名称加入模型菜单；`mcp_status` 可查看连接和发现错误，但不返回环境变量值。
+- MCP 工具位于本地路径/命令安全边界之外。`request` 模式全部审批；`risk` 模式只有 Server 明确声明 `readOnlyHint=true` 的工具自动执行；`full` 模式自动执行。
+- 每个 MCP Server 的 stdio 调用串行化；任务完成、失败或取消后关闭子进程。
+- 每个 Server 维护成功时间、失败时间和连续失败数。连续 3 次协议/传输失败后进入指数冷却，避免 Agent 紧密重试故障服务；`mcp_status` 展示健康状态，`mcp_reconnect` 可在始终人工批准后关闭、重新初始化并刷新工具菜单。
+- initialize 声明 `resources` 或 `prompts` capability 后，模型会得到 `mcp_list_resources`、`mcp_read_resource`、`mcp_list_prompts`、`mcp_get_prompt`。返回内容明确标为不可信外部数据，不会升级为 system 消息。
+- stdio 断线时只自动重放资源、提示模板和 `readOnlyHint=true` 工具等只读请求；写操作遇到不确定结果不会自动重试。
+
+Streamable HTTP 使用同一配置文件，Header 的值仍只能来自环境变量：
+
+```json
+{
+  "servers": {
+    "remote": {
+      "transport": "streamable_http",
+      "url": "https://mcp.example.invalid/endpoint",
+      "headers": {"Authorization": "REMOTE_MCP_AUTH"},
+      "listen": true,
+      "timeout_seconds": 15
+    }
+  }
+}
+```
+
+HTTP 客户端支持 JSON 或 SSE 格式的同步 POST 响应、`Mcp-Session-Id`、`MCP-Protocol-Version` 和会话 DELETE；只读请求连接失败时会重新 initialize 后重试一次。设置 `listen=true` 后建立长驻 GET SSE，接收 Server 主动通知和反向 JSON-RPC 请求；未设置时不会暗中维持网络监听。
+
+HTTP Endpoint 返回 401/403 时会分类为授权问题，不计入普通连接失败冷却。若 401 的 `WWW-Authenticate` 含有 `resource_metadata`，客户端会按 RFC 9728 自动读取同源 Protected Resource Metadata：不携带配置的 Authorization Header、不跟随重定向、限制 64 KB，并要求返回的 `resource` 与 MCP Endpoint URL 完全一致。`mcp_status` 展示所需 scope、验证后的授权服务器地址和发现错误，健康状态标为 `auth_required`。
+
+模型只有在用户逐次批准 `mcp_discover_auth` 后，才会向最多 4 个授权服务器读取 RFC 8414 元数据；issuer 必须精确匹配，远程地址必须使用 HTTPS，并拒绝凭据 URL、查询参数、片段、重定向以及解析到非公网地址的目标。返回结果只保留 authorization/token/registration/JWKS 端点和受支持能力。当前版本不会打开浏览器、动态注册客户端、保存 refresh token 或请求 access token；令牌仍只能由用户通过环境变量提供。更新环境变量后应重启本机 Agent 进程。
+
+客户端在有工作目录时向 MCP 声明 `roots` capability。Server 调用 `roots/list` 只能得到当前对话的工作区 URI，不能枚举其他项目、设置目录或用户主目录；`ping` 返回空成功结果。最近 50 条通知经过字段和显式环境值脱敏后保存在内存，可从 `mcp_status` 查看。收到 `notifications/tools/list_changed` 后会重新执行 `tools/list`，下一轮模型请求使用更新后的工具 Schema。
+
+`sampling/createMessage` 采用受控反向能力：每次调用都要求人工确认，单任务最多 3 次，输入最多 20,000 字符，`maxTokens` 限制为 1–4096。调用使用独立安全 system prompt，不携带 Agent 对话历史、工作区内容或工具，忽略 Server 请求的 `includeContext` 和模型偏好；基础 Chat Completions 适配器把 `maxTokens` 作为请求硬上限，输出仍有字符级回退截断。sampling 与主 Agent 共用模型调用锁，避免同一客户端并发和递归调用。`elicitation/create` 仍明确返回 `-32601`，避免外部 Server 诱导用户提交信息。GET SSE 断开会记录状态但不在后台无限重连；下一次只读请求仍可走现有的安全重连路径。
+
+仓库提供了 [无第三方依赖的 stdio 演示 Server](examples/extensions/mcp_demo_server.py)、[stdio 示例配置](examples/extensions/mcp.example.json) 和 [HTTP 示例配置](examples/extensions/mcp-http.example.json)。把 stdio 示例配置复制为 `.coding-agent/mcp.json` 后提交下一条任务，新一轮 Agent 会发现 `mcp_demo_echo`、演示 resource 和 prompt。
 
 ## 启动本机网页版
 
@@ -159,6 +245,14 @@ python -m coding_agent --no-browser
 | `batch_replace_text` | 跨文件精确替换文本 | 最多 50 个文件；逐文件验证匹配，避免半完成状态 |
 | `run_command` | 执行工作区命令 | 风险分类、确认、超时和输出截断 |
 | `update_task_list` | 更新当前对话的目标、阶段、状态和阻塞原因 | 每次提交完整快照；最多 20 项且最多一个进行中阶段 |
+| `load_skill` | 按名称载入匹配的本地 `SKILL.md` | 只读、按需披露；不自动执行脚本，不扩大权限 |
+| `read_skill_resource` | 读取 Skill 包内单个 UTF-8 参考文件 | 限制目录、编码和大小；脚本文本不会执行 |
+| `run_skill_script` | 执行已载入 Skill 的 `scripts/` 脚本 | 固定解释器、最小环境、超时/取消、脱敏和 Diff；始终人工确认，不是 OS 沙箱 |
+| `mcp_status` / `mcp_<server>_<tool>` | 查看 MCP 连接、通知、错误或调用外部工具 | stdio/HTTP JSON-RPC；动态工具刷新，按只读标注和权限模式审批 |
+| `mcp_reconnect` | 重新启动或连接指定 MCP Server 并刷新工具 | 显式故障恢复；任何权限模式都要求人工确认 |
+| `mcp_discover_auth` | 读取 HTTP MCP 声明的 OAuth 授权服务器元数据 | 每次人工确认；只发现并校验公开元数据，不登录、注册或请求令牌 |
+| `mcp_list_resources` / `mcp_read_resource` | 发现和读取 MCP 外部资源 | 只读；外部内容不具有指令优先级 |
+| `mcp_list_prompts` / `mcp_get_prompt` | 发现和取得 MCP 提示模板 | 只读；生成消息作为不可信工具结果回灌 |
 | `git_status` / `git_diff` | 查询分支、上游、文件状态以及工作区/暂存区 Diff | 只读；支持限定工作区相对路径 |
 | `git_log` / `git_branches` | 查询提交记录与本地分支 | 数量和输出有上限 |
 | `git_create_branch` | 创建并切换本地分支 | 校验 Git 分支名，不覆盖现有分支 |
@@ -348,7 +442,7 @@ Docker CLI 运行在独立进程组中。用户取消后，Windows 使用 `taskk
 python -m pytest
 ```
 
-自动化测试使用脚本化假模型和假 Docker Runner，不访问真实 API、Docker Engine 或远程服务器。覆盖 Agent 循环、工具协议、文件与命令安全、Git 与 Compose 参数数组、DevOps 环境边界、审批矩阵、日志脱敏、部署验证、上下文压缩、会话持久化、本机 HTTP 边界、网页状态机、项目/对话管理和 Diff 展示。
+自动化测试使用脚本化假模型、假 Docker Runner、本机临时 MCP stdio Server 和回环 HTTP Server，不访问真实 API、Docker Engine 或远程服务器。覆盖 Agent 循环、Skill 指令/资源渐进披露与受控脚本、MCP tools/resources/prompts、动态工具通知、roots/ping 反向请求、sampling 审批/预算/隔离/递归保护、stdio 重连、HTTP POST/GET SSE/Session、环境隔离、审批、脱敏、工具协议、文件与命令安全、Git 与 Compose 参数数组、DevOps 环境边界、部署验证、上下文压缩、会话持久化、本机 HTTP 边界、网页状态机、项目/对话管理和 Diff 展示。
 
 ## 人工端到端演示
 

@@ -1,0 +1,10 @@
+{
+  "servers": {
+    "demo": {
+      "command": "python",
+      "args": ["examples/extensions/mcp_demo_server.py"],
+      "cwd": ".",
+      "timeout_seconds": 10
+    }
+  }
+}

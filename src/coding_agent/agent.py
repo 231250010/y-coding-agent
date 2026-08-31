@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -37,6 +38,7 @@ class CodingAgent:
         system_prompt: str = SYSTEM_PROMPT,
         task_list: TaskListState | None = None,
         max_parallel_tools: int = 4,
+        model_call_lock: threading.RLock | None = None,
     ) -> None:
         if max_parallel_tools < 1:
             raise ValueError("max_parallel_tools 必须至少为 1")
@@ -49,11 +51,17 @@ class CodingAgent:
         self.system_prompt = system_prompt
         self.task_list = task_list or TaskListState()
         self.max_parallel_tools = max_parallel_tools
+        self.model_call_lock = model_call_lock or threading.RLock()
         self.history: list[Message] = [{"role": "system", "content": system_prompt}]
 
     def clear(self) -> None:
         self.task_list.replace("", [])
         self.history = [{"role": "system", "content": self.system_prompt}]
+
+    def close(self) -> None:
+        closer = getattr(self.tools, "close", None)
+        if callable(closer):
+            closer()
 
     def restore_history(self, messages: list[Message]) -> None:
         restored = [
@@ -203,33 +211,35 @@ class CodingAgent:
         return bool(checker and checker(call.name, arguments))
 
     def _complete_model(self, step: int) -> AssistantResponse:
-        complete_stream = getattr(self.model, "complete_stream", None)
-        if not callable(complete_stream):
-            return self.model.complete(self.history, self.tools.schemas())
+        with self.model_call_lock:
+            complete_stream = getattr(self.model, "complete_stream", None)
+            if not callable(complete_stream):
+                return self.model.complete(self.history, self.tools.schemas())
 
-        parts: list[str] = []
+            parts: list[str] = []
 
-        def receive(delta: str) -> None:
-            self._check_cancelled()
-            if not delta:
-                return
-            parts.append(delta)
-            self.on_event(
-                "assistant_delta",
-                {"delta": delta, "content": "".join(parts), "step": step},
-            )
+            def receive(delta: str) -> None:
+                self._check_cancelled()
+                if not delta:
+                    return
+                parts.append(delta)
+                self.on_event(
+                    "assistant_delta",
+                    {"delta": delta, "content": "".join(parts), "step": step},
+                )
 
-        return complete_stream(self.history, self.tools.schemas(), receive)
+            return complete_stream(self.history, self.tools.schemas(), receive)
 
     def _summarize(self, old_conversation: str) -> str:
         self.on_event("summary_start", {})
-        response = self.model.complete(
-            [
-                {"role": "system", "content": "你负责忠实压缩编程任务上下文。"},
-                {"role": "user", "content": SUMMARY_PROMPT.format(conversation=old_conversation)},
-            ],
-            None,
-        )
+        with self.model_call_lock:
+            response = self.model.complete(
+                [
+                    {"role": "system", "content": "你负责忠实压缩编程任务上下文。"},
+                    {"role": "user", "content": SUMMARY_PROMPT.format(conversation=old_conversation)},
+                ],
+                None,
+            )
         if response.tool_calls or not response.content:
             raise ModelError("上下文摘要响应无效")
         self.on_event("summary_end", {})

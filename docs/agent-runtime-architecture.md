@@ -21,6 +21,8 @@ HTTP 服务固定监听 `127.0.0.1`，浏览器负责项目、对话、审批、
 | `model.py` | OpenAI Chat Completions 基础客户端适配 |
 | `providers.py` | 多工具提供者组合与默认工具集构建 |
 | `tools.py` | 文件、搜索、编辑与通用命令工具 |
+| `skills.py` | `SKILL.md` 发现、描述目录和按需指令加载 |
+| `mcp.py` | MCP 配置、双向 stdio/Streamable HTTP、tools/resources/prompts、roots、通知和生命周期 |
 | `git_service.py` | 参数数组式 Git 查询和写操作 |
 | `git_tools.py` | Git Schema、参数验证和权限矩阵 |
 | `devops_service.py` | Docker Compose 项目识别、环境选择、命令执行和结果归一化 |
@@ -54,7 +56,11 @@ CodingAgent
         ├── TaskListToolProvider -> TaskListState
         ├── GitToolProvider -> GitService
         ├── GitHubActionsToolProvider -> GitHubActionsService -> gh CLI
-        └── DevOpsToolProvider -> DevOpsService -> Docker CLI / Context
+        ├── DevOpsToolProvider -> DevOpsService -> Docker CLI / Context
+        ├── SkillToolProvider -> SKILL.md / package resources
+        └── MCPToolProvider
+              ├── MCPStdioClient -> configured subprocess
+              └── MCPStreamableHTTPClient -> configured endpoint
 ```
 
 一次编程任务的主要流程：
@@ -64,7 +70,7 @@ CodingAgent
 3. `CodingAgent` 在预算阈值处把旧滚动摘要和新淘汰轮次合并为唯一的新摘要，再以流式 Chat Completions 调用模型并附带本地工具 Schema。文本 delta 立即进入临时展示状态；tool call delta 按 index 重组 ID、名称和参数，完成后才执行。摘要请求仍使用非流式调用，不把摘要正文展示给用户。
 
 上下文裁剪采用软、硬两级预算。超过软阈值时只滚动摘要旧完整轮次，旧工具输出在进入摘要请求前以头尾保留方式限长；最近两轮不因软阈值截断。只有摘要后的消息仍超过硬上限时，才按时间从旧到新缩减近期工具结果，并同时保留开头、结尾和省略量，尽量保住命令尾部的错误与测试总结。
-4. 模型返回工具调用时，组合提供者按工具名路由。连续且由提供者显式声明为只读的调用进入最多四线程的并行批次；未声明、参数无效或会改变状态的调用形成串行屏障。并行结果始终按原始 tool call 顺序写回，保持模型协议确定性。
+4. 模型返回工具调用时，组合提供者按工具名路由。Skill 平时只把名称与描述放进菜单，命中 `load_skill` 时才读取完整 `SKILL.md`，包内参考文件再经 `read_skill_resource` 二次披露。MCP Server 在首次生成 Schema 时完成 initialize、initialized 和 capability 检查；tools/list 的远端名称映射成唯一的 `mcp_<server>_<tool>`，resources/prompts capability 则启用只读桥接工具。stdio 读取线程和可选 HTTP GET SSE 监听把响应、通知与反向请求分流；tools/list_changed 使提供器原子重建远端工具菜单。连续且由本地提供者显式声明为只读的调用进入最多四线程的并行批次；未声明、参数无效、会改变状态或共享 MCP 连接的调用形成串行屏障。并行结果始终按原始 tool call 顺序写回，保持模型协议确定性。
 5. 工具进行参数、路径和权限检查；DevOps 长操作同时回传阶段、环境、耗时和完成比例，执行后返回结构化结果。
 6. Agent 把 `tool` 消息交回模型，并把展示事件交给 `WebRuntime`。
 7. 浏览器通过 `/api/events` 的 SSE 长连接接收带递增 revision 的状态快照，实时渲染模型文本、工具、审批和部署进度；每五秒的 `/api/state` 轮询负责初始加载、断线恢复和旧浏览器兼容，较旧 revision 不会覆盖新状态。
@@ -79,13 +85,21 @@ CodingAgent
 
 ## 工具组合与 Git
 
-`build_default_tool_provider()` 为有工作目录的对话组合五组工具：
+`build_default_tool_provider()` 为有工作目录的对话组合七组工具：
 
 - 文件与命令：浏览、读取、搜索、单文件或批量写入、单文件或批量精确替换和受控命令；批量操作限制文件数和总内容，全量预检通过后才提交，提交异常时恢复原文件；
 - 任务计划：维护独立持久化的目标、阶段、进度与阻塞原因；
 - Git：status、diff、log、branches、create branch、stage、unstage、commit、pull 和 push。
 - GitHub Actions：按 Commit 查询状态、读取失败日志，以及人工确认后重跑失败任务；
 - DevOps：inspect、preflight、build、pull、deploy、status、logs、verify、restart、stop、版本发布和两阶段回滚。
+- Skill：扫描本机和项目 `.coding-agent/skills/*/SKILL.md`，常驻有界描述目录，按需读取正文和目录内单个 UTF-8 资源；`scripts/` 内受支持脚本只能在逐次审批后以固定解释器、最小环境和工作区 cwd 执行，修改进入统一 Diff；
+- MCP：读取本机和项目 `.coding-agent/mcp.json`，自行管理 stdio/Streamable HTTP JSON-RPC 生命周期、远端工具命名空间、resources、prompts 和受控 sampling。
+
+MCP 配置只允许按变量名选择环境变量或 HTTP Header，不接受字面 secret 字段。stdio 子进程使用最小继承环境，不默认获得模型 API Key；显式传入的变量值会从 stderr、协议错误、通知和工具结果中脱敏。配置命令使用参数数组和 `shell=False`，`cwd` 必须留在工作区。Streamable HTTP 支持 POST JSON/SSE、Session ID、DELETE，以及显式 `listen=true` 的 GET SSE。客户端只声明当前工作区作为 roots；ping 自动响应。sampling 每次都审批，单任务限 3 次，以独立安全提示、无历史、无工具、受限输入与输出执行，并与主循环共用模型锁；elicitation 固定拒绝。通知在内存保留最近 50 条，GET 断开只记状态而不无限后台重试。MCP 工具不受本地路径与命令分类器保护，因此 `request` 模式全部审批，`risk` 模式只放行 Server 明确标记为只读的工具；resource/prompt 始终作为不可信 tool 内容。只有只读请求会在连接中断后重新 initialize 并重试，避免重复外部写操作。Provider 记录每个 Server 的最近成功/失败与连续失败数；连续 3 次失败进入 5 秒起、最高 60 秒的指数冷却，显式 `mcp_reconnect` 经人工批准后重建连接、清除冷却并原子刷新工具集合。Agent 任务退出时统一关闭子进程、HTTP 监听和 Session。
+
+HTTP 401/403 走独立授权状态，不污染传输健康计数。401 challenge 中的 Protected Resource Metadata 只允许同源获取，禁止重定向和凭据 URL，不复用 MCP Authorization Header，并严格验证 RFC 9728 `resource`；远程元数据域名解析到非公网地址时按潜在 SSRF 拒绝。Authorization Server Metadata 是第二段显式审批操作，最多处理 4 个 issuer，按 RFC 8414 构造 well-known URL并验证返回 issuer，只输出白名单字段。本阶段止于发现，不实现浏览器授权码、PKCE、动态注册、token 交换或持久化。
+
+Skill 脚本和 MCP Server 都是应用层受控扩展，不构成 OS 沙箱。前者必须先完整读取并记录 SHA-256，运行审批前后摘要一致且用户明确批准才会启动；后者位于本地文件/命令分类器之外。信任来源、最小凭据与最小权限仍是部署责任。
 
 Git 命令使用参数数组和 `shell=False`。路径必须位于当前工作目录内；pull 固定使用 fast-forward-only；push 只使用已有上游或 `origin/当前分支`。hard reset、clean、force push 和删除远端引用不属于结构化能力，并由通用命令安全规则拒绝。
 
@@ -99,7 +113,7 @@ DevOps 控制面以 Docker Compose 为第一阶段目标。默认使用当前 Do
 
 版本发布先生成只读门禁预览，逐项展示命令并按参数数组分类。Shell 和内联解释器直接拒绝，未知命令及本次任务修改过的门禁配置在 `full` 模式下也强制审批；审批绑定 `coding-agent.toml` SHA-256，服务执行前再次校验，避免确认后的配置替换。门禁随后采集 Git Commit、分支、脏工作区状态、Compose 摘要和检查结果；失败时不执行 Docker 变更。健康验证后记录 Compose 镜像引用和镜像 ID，并按环境维护活动版本。回滚计划与执行分离：计划只读、十分钟过期且只能使用一次；执行工具无视 `full` 权限豁免，始终创建人工审批。回滚先记录当前镜像现场，再检查历史镜像、恢复标签、使用 `--no-build` 重建服务并重新验证。数据库和数据卷明确位于自动回滚边界之外。
 
-无工作目录的对话只暴露任务清单工具，不暴露文件、Git、CI 或 DevOps 工具，仍可处理一般问答。
+无工作目录的对话不暴露文件、Git、CI 或 DevOps 工具，仍可使用任务清单、本机级 Skill，以及没有配置 `cwd` 的本机级 MCP Server。
 
 ## 权限与审批
 

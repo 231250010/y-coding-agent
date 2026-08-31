@@ -68,6 +68,23 @@ def test_adapter_omits_tools_for_summary_requests() -> None:
     assert "tool_choice" not in completions.requests[0]
 
 
+def test_adapter_applies_hard_max_tokens_without_tools() -> None:
+    model, completions = fake_model([response()])
+    result = model.complete_with_max_tokens(
+        [{"role": "user", "content": "bounded"}], 64
+    )
+    assert result.content == "done"
+    assert completions.requests[0]["max_tokens"] == 64
+    assert "tools" not in completions.requests[0]
+    assert "tool_choice" not in completions.requests[0]
+
+
+def test_adapter_rejects_invalid_hard_max_tokens() -> None:
+    model, _ = fake_model([])
+    with pytest.raises(ValueError, match="正整数"):
+        model.complete_with_max_tokens([], 0)
+
+
 def test_streaming_adapter_emits_text_and_reassembles_tool_calls() -> None:
     call_start = SimpleNamespace(
         index=0,

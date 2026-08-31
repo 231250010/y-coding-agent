@@ -688,6 +688,9 @@ class WebRuntime:
             self._finish_error(task_id, "error", str(exc), agent)
         except Exception as exc:
             self._finish_error(task_id, "error", f"任务执行失败: {type(exc).__name__}: {exc}", agent)
+        finally:
+            if agent is not None:
+                agent.close()
 
     def _finish_error(
         self,
@@ -752,6 +755,7 @@ class WebRuntime:
             timeout=config.request_timeout,
             max_retries=config.max_retries,
         )
+        model_call_lock = threading.RLock()
         tools = build_default_tool_provider(
             workspace,
             approver=lambda command, risk, reason: self._request_approval(
@@ -769,6 +773,9 @@ class WebRuntime:
             on_task_list_update=lambda snapshot: self._handle_task_list_update(
                 task.id, snapshot
             ),
+            extension_root=self.settings_root,
+            sampling_model=model,
+            sampling_model_lock=model_call_lock,
         )
         return CodingAgent(
             model,
@@ -779,6 +786,7 @@ class WebRuntime:
             is_cancelled=task.cancel_event.is_set,
             system_prompt=SYSTEM_PROMPT if workspace else PROJECTLESS_SYSTEM_PROMPT,
             task_list=task.task_list,
+            model_call_lock=model_call_lock,
         )
 
     def _handle_task_list_update(
