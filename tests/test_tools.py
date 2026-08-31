@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import threading
 from pathlib import Path
 
@@ -39,6 +40,37 @@ def test_run_command_uses_selected_workspace_not_agent_root(tmp_path: Path) -> N
     assert result.ok is True
     assert (workspace / "cwd.txt").read_text(encoding="utf-8") == "ok"
     assert not (agent_root / "cwd.txt").exists()
+
+
+def test_run_process_uses_argv_without_shell_and_runs_validation(tmp_path: Path) -> None:
+    source = tmp_path / "valid.py"
+    source.write_text("value = 1\n", encoding="utf-8")
+    approvals: list[str] = []
+    tools = ToolRegistry(
+        tmp_path,
+        approver=lambda command, *_args: approvals.append(command) or True,
+    )
+
+    result = tools.execute(
+        "run_process",
+        {
+            "argv": [sys.executable, "-m", "py_compile", "valid.py"],
+            "timeout_seconds": 10,
+        },
+    )
+
+    assert result.ok is True and "exit_code=0" in result.output
+    assert approvals  # An absolute interpreter path is conservatively reviewed.
+
+
+def test_run_process_rejects_shell_interpreters_and_invalid_items(tmp_path: Path) -> None:
+    tools = registry(tmp_path)
+
+    shell = tools.execute("run_process", {"argv": ["powershell", "-Command", "pwd"]})
+    invalid = tools.execute("run_process", {"argv": ["python", ""]})
+
+    assert shell.ok is False and "安全策略拒绝" in str(shell.error)
+    assert invalid.ok is False and "argv" in str(invalid.error)
 
 
 def test_write_read_list_and_replace(tmp_path: Path) -> None:

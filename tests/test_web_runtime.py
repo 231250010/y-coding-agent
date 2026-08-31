@@ -112,6 +112,22 @@ def test_project_and_conversation_are_created_for_existing_directory(tmp_path: P
     assert "api_key" not in state["settings"]
 
 
+def test_checkpoint_event_persists_agent_history_immediately(tmp_path: Path) -> None:
+    runtime = WebRuntime(settings(tmp_path), tmp_path, model_factory=lambda: ScriptedModel([]))
+    project = runtime.add_project(str(tmp_path))
+    task = runtime.new_conversation(project["id"])
+    history = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "write"},
+        {"role": "tool", "tool_call_id": "c1", "content": '{"ok": true}'},
+    ]
+
+    runtime._handle_agent_event(task["id"], "checkpoint", {"history": history})
+
+    stored = runtime.store.load()
+    assert stored["tasks"][0]["history"] == history
+
+
 def test_task_list_tool_updates_anchor_and_persists_across_runtime_restart(
     tmp_path: Path,
 ) -> None:
@@ -195,6 +211,7 @@ def test_message_runs_existing_agent_loop_and_attaches_changes_once(tmp_path: Pa
                 ]
             ),
             AssistantResponse("文件已经写好。"),
+            AssistantResponse("文件已经写好，但没有可运行的验证。"),
         ]
     )
     runtime = WebRuntime(settings(agent_root), agent_root, model_factory=lambda: model)
@@ -209,6 +226,8 @@ def test_message_runs_existing_agent_loop_and_attaches_changes_once(tmp_path: Pa
     assert [entry["kind"] for entry in completed["entries"]] == ["user", "tool", "assistant"]
     assert completed["entries"][-1]["change_paths"] == ["hello.txt"]
     assert sum(bool(entry["change_paths"]) for entry in completed["entries"]) == 1
+    assert completed["status"] == "已完成 · 未验证"
+    assert completed["execution"]["outcome"] == "completed_unverified"
 
 
 def test_net_zero_temporary_file_is_removed_from_pending_changes(tmp_path: Path) -> None:

@@ -7,7 +7,7 @@ from typing import Any
 
 
 def empty_session_state() -> dict[str, Any]:
-    return {"version": 5, "current_id": None, "projects": [], "tasks": []}
+    return {"version": 6, "current_id": None, "projects": [], "tasks": []}
 
 
 def _normalize_task(task: dict[str, Any], project_id: str | None = None) -> dict[str, Any]:
@@ -38,6 +38,11 @@ def _normalize_task(task: dict[str, Any], project_id: str | None = None) -> dict
         task_copy["task_list"] = deepcopy(raw_task_list)
     else:
         task_copy.pop("task_list", None)
+    raw_execution_state = task_copy.get("execution_state")
+    if isinstance(raw_execution_state, dict):
+        task_copy["execution_state"] = deepcopy(raw_execution_state)
+    else:
+        task_copy.pop("execution_state", None)
     return task_copy
 
 
@@ -71,20 +76,20 @@ def normalize_session_state(value: Any) -> dict[str, Any]:
                     _normalize_task(task, project_id if isinstance(project_id, str) else None)
                 )
         return {
-            "version": 5,
+            "version": 6,
             "current_id": None,
             "projects": normalized_projects,
             "tasks": normalized_tasks,
         }
 
-    if version in {2, 3, 4, 5}:
+    if version in {2, 3, 4, 5, 6}:
         tasks = value.get("tasks")
         if not isinstance(tasks, list):
             return empty_session_state()
         normalized_tasks = [_normalize_task(task) for task in tasks if isinstance(task, dict)]
         current_id = value.get("current_id")
         return {
-            "version": 5,
+            "version": 6,
             "current_id": current_id if isinstance(current_id, str) else None,
             "projects": [deepcopy(project) for project in projects if isinstance(project, dict)],
             "tasks": normalized_tasks,

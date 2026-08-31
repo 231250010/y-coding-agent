@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
 from collections.abc import Sequence
@@ -97,6 +98,7 @@ def test_tool_end_exposes_local_changes_without_sending_them_to_model(tmp_path: 
     model = ScriptedModel([
         AssistantResponse(tool_calls=[call("c1", "write_file", {"path": "a.txt", "content": "hello\n"})]),
         AssistantResponse("done"),
+        AssistantResponse("done without validation"),
     ])
     tools = ToolRegistry(tmp_path, approver=lambda *_args: True, change_tracker=tracker)
     agent = CodingAgent(
@@ -106,13 +108,59 @@ def test_tool_end_exposes_local_changes_without_sending_them_to_model(tmp_path: 
         on_event=lambda name, data: events.append((name, data)),
     )
 
-    agent.run("write")
+    result = agent.run("write")
 
     event = next(data for name, data in events if name == "tool_end")
     assert event["changes"]["paths"] == ["a.txt"]
     tool_payload = json.loads(model.requests[1][0][-1]["content"])
     assert "changes" not in tool_payload
+    assert result.startswith("⚠️")
+    assert agent.execution_state.outcome == "completed_unverified"
+    assert any(
+        checkpoint["history"][-1].get("role") == "tool"
+        for name, checkpoint in events
+        if name == "checkpoint" and checkpoint.get("history")
+    )
 
+
+def test_completion_gate_requests_validation_and_accepts_fresh_evidence(
+    tmp_path: Path,
+) -> None:
+    tracker = ConversationChangeTracker(tmp_path)
+    model = ScriptedModel(
+        [
+            AssistantResponse(
+                tool_calls=[call(
+                    "c1",
+                    "write_file",
+                    {"path": "valid.py", "content": "answer = 42\n"},
+                )]
+            ),
+            AssistantResponse("已经完成"),
+            AssistantResponse(
+                tool_calls=[call(
+                    "c2",
+                    "run_process",
+                    {
+                        "argv": [sys.executable, "-m", "py_compile", "valid.py"],
+                        "timeout_seconds": 10,
+                    },
+                )]
+            ),
+            AssistantResponse("已写入并通过语法检查"),
+        ]
+    )
+    agent = CodingAgent(
+        model,
+        ToolRegistry(tmp_path, approver=lambda *_args: True, change_tracker=tracker),
+        ContextManager(100_000),
+    )
+
+    assert agent.run("创建 Python 文件并验证") == "已写入并通过语法检查"
+    assert model.requests[2][0][-1]["role"] == "system"
+    assert "完成门禁" in str(model.requests[2][0][-1]["content"])
+    assert agent.execution_state.outcome == "completed"
+    assert not agent.execution_state.needs_validation
 
 
 def test_multiple_tools_are_executed_in_order(tmp_path: Path) -> None:
@@ -256,8 +304,35 @@ def test_max_steps_stops(tmp_path: Path) -> None:
 def test_clear_preserves_only_system_prompt(tmp_path: Path) -> None:
     agent, _ = make_agent(tmp_path, [AssistantResponse("done")])
     agent.run("task")
+    agent.execution_state.mutation_revision = 1
     agent.clear()
     assert len(agent.history) == 1 and agent.history[0]["role"] == "system"
+    assert agent.execution_state.to_storage()["mutation_revision"] == 0
+
+
+def test_unverified_gap_is_not_repeated_on_unrelated_later_turn(tmp_path: Path) -> None:
+    tracker = ConversationChangeTracker(tmp_path)
+    model = ScriptedModel(
+        [
+            AssistantResponse(
+                tool_calls=[call(
+                    "c1", "write_file", {"path": "a.txt", "content": "hello"}
+                )]
+            ),
+            AssistantResponse("第一次完成"),
+            AssistantResponse("无法验证"),
+            AssistantResponse("这是后续说明"),
+        ]
+    )
+    agent = CodingAgent(
+        model,
+        ToolRegistry(tmp_path, approver=lambda *_args: True, change_tracker=tracker),
+        ContextManager(100_000),
+    )
+
+    assert agent.run("写文本").startswith("⚠️")
+    assert agent.run("解释一下") == "这是后续说明"
+    assert agent.execution_state.outcome == "completed"
 
 
 def test_cancel_stops_before_model_call(tmp_path: Path) -> None:
@@ -275,6 +350,10 @@ def test_cancel_stops_before_model_call(tmp_path: Path) -> None:
 
 
 def test_agent_retry_workflow_keeps_final_cumulative_diff(tmp_path: Path) -> None:
+    (tmp_path / "test_calc.py").write_text(
+        "from calc import add\n\ndef test_add():\n    assert add(2, 3) == 5\n",
+        encoding="utf-8",
+    )
     tracker = ConversationChangeTracker(tmp_path)
     events: list[tuple[str, dict[str, Any]]] = []
     responses = [
@@ -285,18 +364,22 @@ def test_agent_retry_workflow_keeps_final_cumulative_diff(tmp_path: Path) -> Non
         )]),
         AssistantResponse(tool_calls=[call(
             "c2",
-            "run_command",
-            {"command": 'python -c "import sys; sys.exit(1)"', "timeout_seconds": 10},
+            "run_process",
+            {"argv": [sys.executable, "-m", "pytest", "-q"], "timeout_seconds": 10},
         )]),
         AssistantResponse(tool_calls=[call(
             "c3",
             "replace_text",
-            {"path": "calc.py", "old_text": "a - b", "new_text": "a + b"},
+            {
+                "path": "calc.py",
+                "old_text": "return a - b",
+                "new_text": "return a + b  # fixed",
+            },
         )]),
         AssistantResponse(tool_calls=[call(
             "c4",
-            "run_command",
-            {"command": 'python -c "from calc import add; assert add(2, 3) == 5"', "timeout_seconds": 10},
+            "run_process",
+            {"argv": [sys.executable, "-m", "pytest", "-q"], "timeout_seconds": 10},
         )]),
         AssistantResponse("修复完成"),
     ]
@@ -310,7 +393,11 @@ def test_agent_retry_workflow_keeps_final_cumulative_diff(tmp_path: Path) -> Non
     )
 
     assert agent.run("实现并测试加法") == "修复完成"
-    assert tracker.changes["calc.py"].segments[0].latest.text == "def add(a, b):\n    return a + b\n"
+    assert tracker.changes["calc.py"].segments[0].latest.text == (
+        "def add(a, b):\n    return a + b  # fixed\n"
+    )
+    assert agent.execution_state.outcome == "completed"
+    assert agent.execution_state.verified_revision == agent.execution_state.mutation_revision
     assert any(
         data.get("changes", {}).get("paths") == ["calc.py"]
         for name, data in events

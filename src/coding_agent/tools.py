@@ -147,7 +147,7 @@ class ToolRegistry:
             tracked_paths = [path for path in mutation_paths if self._inside_workspace(path)]
             if self.change_tracker and tracked_paths:
                 capture = self.change_tracker.capture_paths(tracked_paths)
-            elif self.change_tracker and name == "run_command":
+            elif self.change_tracker and name in {"run_command", "run_process"}:
                 capture = self.change_tracker.capture_workspace()
             result = tool.handler(arguments)
         except (OSError, UnicodeError, ValueError) as exc:
@@ -331,6 +331,30 @@ class ToolRegistry:
                     "additionalProperties": False,
                 },
                 self._batch_replace_text,
+            ),
+            LocalTool(
+                "run_process",
+                "使用参数数组和 shell=False 在工作区执行测试、构建或检查；优先用于可验证命令。",
+                {
+                    "type": "object",
+                    "properties": {
+                        "argv": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 1,
+                            "maxItems": 30,
+                        },
+                        "timeout_seconds": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 300,
+                            "default": 60,
+                        },
+                    },
+                    "required": ["argv"],
+                    "additionalProperties": False,
+                },
+                self._run_process,
             ),
             LocalTool(
                 "run_command",
@@ -700,6 +724,39 @@ class ToolRegistry:
             shell_command = ["powershell", "-NoProfile", "-NonInteractive", "-Command", wrapped]
         else:
             shell_command = ["/bin/sh", "-lc", command]
+        return self._execute_process(shell_command, timeout)
+
+    def _run_process(self, args: dict[str, Any]) -> ToolResult:
+        raw_argv = args["argv"]
+        timeout = args.get("timeout_seconds", 60)
+        if (
+            not isinstance(raw_argv, list)
+            or not raw_argv
+            or len(raw_argv) > 30
+            or any(
+                not isinstance(item, str)
+                or not item
+                or len(item) > 4_096
+                or "\x00" in item
+                or "\n" in item
+                or "\r" in item
+                for item in raw_argv
+            )
+        ):
+            return ToolResult(False, error="argv 必须是 1 到 30 项的有界非空字符串数组")
+        command = list(raw_argv)
+        decision = self.policy.classify_argv(command)
+        if decision.level == RiskLevel.DENY:
+            return ToolResult(False, error=f"安全策略拒绝命令: {decision.reason}")
+        needs_approval = self.approval_mode == "request" or (
+            self.approval_mode != "full" and decision.level == RiskLevel.REVIEW
+        )
+        rendered = subprocess.list2cmdline(command)
+        if needs_approval and not self.approver(rendered, decision.level, decision.reason):
+            return ToolResult(False, error=f"用户未批准命令: {decision.reason}")
+        return self._execute_process(command, timeout)
+
+    def _execute_process(self, command: list[str], timeout: int) -> ToolResult:
         popen_options: dict[str, Any] = {
             "cwd": self.workspace,
             "stdout": subprocess.PIPE,
@@ -712,13 +769,13 @@ class ToolRegistry:
             popen_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
         else:
             popen_options["start_new_session"] = True
-        process = subprocess.Popen(shell_command, **popen_options)
+        process = subprocess.Popen(command, **popen_options)
         deadline = time.monotonic() + timeout
         while True:
             try:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise subprocess.TimeoutExpired(shell_command, timeout)
+                    raise subprocess.TimeoutExpired(command, timeout)
                 stdout, stderr = process.communicate(timeout=min(0.2, remaining))
                 break
             except subprocess.TimeoutExpired:

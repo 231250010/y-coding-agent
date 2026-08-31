@@ -18,6 +18,7 @@ from .changes import (
 )
 from .config import Config
 from .context import ContextManager
+from .execution_state import ExecutionState
 from .local_settings import LocalSettings
 from .model import ChatModel, ModelError, OpenAIChatModel
 from .permissions import PERMISSION_MODES, normalize_permission_mode
@@ -89,6 +90,7 @@ class WebTask:
     worktree_base_commit: str | None = None
     workspace_changing: bool = False
     task_list: TaskListState = field(default_factory=TaskListState)
+    execution_state: ExecutionState = field(default_factory=ExecutionState)
 
 
 ModelFactory = Callable[[], ChatModel]
@@ -666,6 +668,7 @@ class WebRuntime:
             with self.lock:
                 task = self._task(task_id)
                 task.history = list(agent.history)
+                task.execution_state = agent.execution_state
                 visible_paths = tuple(
                     path for path in task.pending_change_paths if path in task.change_tracker.turn_changes
                 )
@@ -680,7 +683,11 @@ class WebRuntime:
                 task.streaming_content = ""
                 task.pending_change_paths.clear()
                 task.running = False
-                task.status = "已完成"
+                task.status = (
+                    "已完成"
+                    if task.execution_state.outcome == "completed"
+                    else "已完成 · 未验证"
+                )
                 self._save()
         except AgentCancelled:
             self._finish_error(task_id, "system", "任务已停止", agent)
@@ -706,6 +713,11 @@ class WebRuntime:
                 return
             if agent is not None:
                 task.history = list(agent.history)
+                task.execution_state = agent.execution_state
+                if kind == "system":
+                    task.execution_state.mark_cancelled()
+                else:
+                    task.execution_state.mark_failed()
             visible_paths = tuple(
                 path for path in task.pending_change_paths if path in task.change_tracker.turn_changes
             )
@@ -787,6 +799,7 @@ class WebRuntime:
             system_prompt=SYSTEM_PROMPT if workspace else PROJECTLESS_SYSTEM_PROMPT,
             task_list=task.task_list,
             model_call_lock=model_call_lock,
+            execution_state=task.execution_state,
         )
 
     def _handle_task_list_update(
@@ -818,6 +831,14 @@ class WebRuntime:
                 return
             elif name == "summary_start":
                 task.status = "正在压缩上下文"
+            elif name == "checkpoint":
+                history = data.get("history")
+                if isinstance(history, list) and all(
+                    isinstance(message, dict) for message in history
+                ):
+                    task.history = [dict(message) for message in history]
+                self._save()
+                return
             elif name == "tool_start":
                 task.streaming_content = ""
                 task.status = f"正在执行 {data.get('name', '工具')}"
@@ -967,6 +988,7 @@ class WebRuntime:
                     else None
                 ),
                 task_list=TaskListState.from_storage(raw.get("task_list")),
+                execution_state=ExecutionState.from_storage(raw.get("execution_state")),
             )
             if stored_worktree and worktree_path is None:
                 task.entries.append(
@@ -980,7 +1002,7 @@ class WebRuntime:
     def _save(self) -> None:
         self.store.save(
             {
-                "version": 5,
+                "version": 6,
                 "current_id": self.current_id,
                 "projects": [self._project_payload(project) for project in self.projects],
                 "tasks": [
@@ -1006,6 +1028,7 @@ class WebRuntime:
                         "pending_change_paths": list(task.pending_change_paths),
                         "worktree": self._worktree_payload(task),
                         "task_list": self._task_list_storage(task),
+                        "execution_state": task.execution_state.to_storage(),
                     }
                     for task in self.tasks
                 ],
@@ -1064,6 +1087,7 @@ class WebRuntime:
             "worktree": self._worktree_payload(task),
             "workspace_changing": task.workspace_changing,
             "task_list": task.task_list.snapshot(),
+            "execution": task.execution_state.completion_evidence(),
             "entries": [
                 {
                     "id": entry.id,

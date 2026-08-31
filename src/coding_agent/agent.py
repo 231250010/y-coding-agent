@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from .context import ContextManager
+from .execution_state import ExecutionState
 from .model import AssistantResponse, ChatModel, Message, ModelError, ToolCall
 from .providers import ToolProvider
 from .prompts import SUMMARY_PROMPT, SYSTEM_PROMPT
@@ -39,6 +40,7 @@ class CodingAgent:
         task_list: TaskListState | None = None,
         max_parallel_tools: int = 4,
         model_call_lock: threading.RLock | None = None,
+        execution_state: ExecutionState | None = None,
     ) -> None:
         if max_parallel_tools < 1:
             raise ValueError("max_parallel_tools 必须至少为 1")
@@ -52,10 +54,12 @@ class CodingAgent:
         self.task_list = task_list or TaskListState()
         self.max_parallel_tools = max_parallel_tools
         self.model_call_lock = model_call_lock or threading.RLock()
+        self.execution_state = execution_state or ExecutionState()
         self.history: list[Message] = [{"role": "system", "content": system_prompt}]
 
     def clear(self) -> None:
         self.task_list.replace("", [])
+        self.execution_state = ExecutionState()
         self.history = [{"role": "system", "content": self.system_prompt}]
 
     def close(self) -> None:
@@ -77,16 +81,22 @@ class CodingAgent:
     def run(self, task: str) -> str:
         if not task.strip():
             raise ValueError("任务不能为空")
+        self.execution_state.begin_run()
         self._sync_task_list_anchor()
         self.history.append({"role": "user", "content": task})
+        self._checkpoint()
         last_error: str | None = None
         repeated_errors = 0
+        completion_reminded = False
 
         for step in range(1, self.max_steps + 1):
             self._check_cancelled()
             self._sync_task_list_anchor()
             self.on_event("model_start", {"step": step, "max_steps": self.max_steps})
-            self.history = self.context.compact(self.history, self._summarize)
+            compacted = self.context.compact(self.history, self._summarize)
+            if compacted != self.history:
+                self.history = compacted
+                self._checkpoint()
             response = self._complete_model(step)
             self._check_cancelled()
             self._append_assistant(response)
@@ -94,14 +104,57 @@ class CodingAgent:
             if not response.tool_calls:
                 content = (response.content or "").strip()
                 if not content:
+                    self.execution_state.mark_failed()
                     raise AgentStopped("模型既未返回文本，也未调用工具")
-                self.on_event("final", {"content": content, "step": step})
+                if (
+                    self.execution_state.has_unreported_evidence_gap
+                    and not completion_reminded
+                    and step < self.max_steps
+                ):
+                    completion_reminded = True
+                    self.history.append(
+                        {
+                            "role": "system",
+                            "content": (
+                                "完成门禁：当前修改版本尚无修改后的成功验证证据。"
+                                "请运行相关测试、构建或静态检查；如果客观上无法验证，"
+                                "下一次最终回答必须明确说明未验证原因，不能声称测试已经通过。"
+                            ),
+                        }
+                    )
+                    self._checkpoint()
+                    continue
+                # Report each new evidence gap once. A later unrelated user turn
+                # should not inherit the same warning indefinitely.
+                verified = not self.execution_state.has_unreported_evidence_gap
+                self.execution_state.mark_completed(verified=verified)
+                if not verified:
+                    content = "⚠️ 当前修改尚未获得修改后的成功验证证据。\n\n" + content
+                self.on_event(
+                    "final",
+                    {
+                        "content": content,
+                        "step": step,
+                        "execution": self.execution_state.completion_evidence(),
+                    },
+                )
+                self._checkpoint()
                 return content
 
             for call, result in self._execute_calls(response.tool_calls):
+                try:
+                    observed_arguments = json.loads(call.arguments)
+                except json.JSONDecodeError:
+                    observed_arguments = {}
+                if not isinstance(observed_arguments, dict):
+                    observed_arguments = {}
+                self.execution_state.observe(call.name, observed_arguments, result)
                 self.history.append(
                     {"role": "tool", "tool_call_id": call.id, "content": result.to_message()}
                 )
+                # Persist protocol history before emitting optional UI details so
+                # a crash cannot leave disk changes without their ToolResult.
+                self._checkpoint()
                 self.on_event(
                     "tool_end",
                     {
@@ -123,8 +176,10 @@ class CodingAgent:
                     repeated_errors = repeated_errors + 1 if fingerprint == last_error else 1
                     last_error = fingerprint
                     if repeated_errors >= 3:
+                        self.execution_state.mark_failed()
                         raise AgentStopped(f"连续三次发生相同工具错误，已停止: {result.error}")
 
+        self.execution_state.mark_failed()
         raise AgentStopped(f"达到最大步骤数 {self.max_steps}，任务未正常结束")
 
     def _sync_task_list_anchor(self) -> None:
@@ -139,7 +194,17 @@ class CodingAgent:
 
     def _check_cancelled(self) -> None:
         if self.is_cancelled():
+            self.execution_state.mark_cancelled()
             raise AgentCancelled("任务已由用户停止")
+
+    def _checkpoint(self) -> None:
+        self.on_event(
+            "checkpoint",
+            {
+                "history": [dict(message) for message in self.history],
+                "execution_state": self.execution_state.to_storage(),
+            },
+        )
 
     def _append_assistant(self, response: AssistantResponse) -> None:
         message: Message = {"role": "assistant", "content": response.content}
