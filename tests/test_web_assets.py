@@ -110,9 +110,21 @@ def test_frontend_streams_state_with_sse_and_renders_partial_assistant_text() ->
     assert 'stateEvents.addEventListener("state"' in javascript
     assert "task.streaming_content" in javascript
     assert "entry.streaming" in javascript
+    assert "function renderTranscript(task, streaming)" in javascript
+    assert "function updateStreamingMessage(text)" in javascript
+    assert "ui.transcript.append(streamingMessage)" in javascript
+    assert "lastTranscriptKey" not in javascript
     assert "setInterval(() => refresh(true), 5000)" in javascript
     assert ".message.streaming" in css
     assert "stream-cursor" in css
+
+
+def test_ui_controls_share_one_explicit_font_family() -> None:
+    css = asset("app.css")
+
+    assert "button, input, textarea, select { font: inherit; font-family: var(--ui); }" in css
+    assert "option { font-family: var(--ui); }" in css
+    assert ".permission-mode" in css and "font-family: var(--ui)" in css
 
 
 def test_change_cards_request_their_own_turn_diff() -> None:

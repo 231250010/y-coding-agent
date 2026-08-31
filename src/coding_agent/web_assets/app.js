@@ -48,7 +48,11 @@ let deleteTarget = null;
 let menuEl = null;
 let menuAnchor = null;
 let shownApproval = null;
-let lastTranscriptKey = "";
+let lastSidebarKey = "";
+let transcriptTaskId = null;
+let renderedEntryKeys = [];
+let streamingMessage = null;
+let lastStreamingText = "";
 let stateEvents = null;
 let toastTimer = null;
 
@@ -220,6 +224,13 @@ function taskNode(task) {
 }
 
 function renderSidebar() {
+  const sidebarKey = JSON.stringify({
+    current: state.current_id,
+    projects: state.projects.map((project) => [project.id, project.title, project.path]),
+    tasks: state.tasks.map((task) => [task.id, task.project_id, task.title, task.running]),
+  });
+  if (sidebarKey === lastSidebarKey) return;
+  lastSidebarKey = sidebarKey;
   ui.projectList.replaceChildren();
   ui.taskList.replaceChildren();
   for (const project of state.projects) {
@@ -263,6 +274,59 @@ function messageNode(entry) {
     article.append(summary);
   }
   return article;
+}
+
+function transcriptEntryKey(entry, index) {
+  return entry.id || `${index}:${entry.kind}:${entry.text}`;
+}
+
+function isTranscriptNearBottom() {
+  return ui.transcript.scrollHeight - ui.transcript.scrollTop - ui.transcript.clientHeight < 96;
+}
+
+function updateStreamingMessage(text) {
+  if (!streamingMessage || !streamingMessage.isConnected) {
+    streamingMessage = messageNode({
+      kind: "assistant", text, change_paths: [], streaming: true,
+    });
+    ui.transcript.append(streamingMessage);
+  } else if (text !== lastStreamingText) {
+    const body = streamingMessage.querySelector(".message-body");
+    body.replaceChildren();
+    renderMarkdown(text, body);
+  }
+  lastStreamingText = text;
+}
+
+function renderTranscript(task, streaming) {
+  const shouldFollow = transcriptTaskId !== task.id || isTranscriptNearBottom();
+  const nextKeys = task.entries.map(transcriptEntryKey);
+  const canAppend = transcriptTaskId === task.id
+    && renderedEntryKeys.length <= nextKeys.length
+    && renderedEntryKeys.every((key, index) => key === nextKeys[index]);
+
+  if (!canAppend) {
+    ui.transcript.replaceChildren(...task.entries.map(messageNode));
+    streamingMessage = null;
+    lastStreamingText = "";
+  } else if (nextKeys.length > renderedEntryKeys.length) {
+    if (streamingMessage) streamingMessage.remove();
+    streamingMessage = null;
+    lastStreamingText = "";
+    for (const entry of task.entries.slice(renderedEntryKeys.length)) {
+      ui.transcript.append(messageNode(entry));
+    }
+  }
+
+  transcriptTaskId = task.id;
+  renderedEntryKeys = nextKeys;
+  if (streaming) updateStreamingMessage(streaming);
+  else if (streamingMessage) {
+    streamingMessage.remove();
+    streamingMessage = null;
+    lastStreamingText = "";
+  }
+  if (shouldFollow) ui.transcript.scrollTop = ui.transcript.scrollHeight;
 }
 
 const operationLabels = {
@@ -339,6 +403,7 @@ function renderConversation() {
     ui.title.textContent = "新对话"; ui.status.textContent = "就绪";
     ui.workspace.textContent = "尚未选择工作目录"; ui.empty.hidden = false;
     ui.transcript.replaceChildren(); ui.send.disabled = false; ui.stop.hidden = true;
+    transcriptTaskId = null; renderedEntryKeys = []; streamingMessage = null; lastStreamingText = "";
     ui.progress.hidden = true;
     ui.taskPlan.hidden = true;
     ui.workspace.disabled = false; ui.composerWorkspace.disabled = false;
@@ -369,16 +434,7 @@ function renderConversation() {
   renderProgress(task);
   const streaming = task.streaming_content || "";
   ui.empty.hidden = task.entries.length > 0 || Boolean(streaming);
-  const last = task.entries.length ? task.entries[task.entries.length - 1].text : "";
-  const key = `${task.id}:${task.entries.length}:${last}:${task.running}:${streaming}`;
-  if (key !== lastTranscriptKey) {
-    const entries = streaming
-      ? [...task.entries, { kind: "assistant", text: streaming, change_paths: [], streaming: true }]
-      : task.entries;
-    ui.transcript.replaceChildren(...entries.map(messageNode));
-    ui.transcript.scrollTop = ui.transcript.scrollHeight;
-    lastTranscriptKey = key;
-  }
+  renderTranscript(task, streaming);
 }
 
 function renderSettingsStatus() {
