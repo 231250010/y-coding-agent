@@ -15,8 +15,8 @@ button, input, textarea, select { font: inherit; font-family: var(--ui); }
 option { font-family: var(--ui); }
 button { color: inherit; }
 button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 3px solid rgb(242 169 126 / 55%); outline-offset: 2px; }
-.shell { display: grid; grid-template-columns: 292px minmax(520px, 1fr) 0; width: 100%; height: 100%; transition: grid-template-columns 180ms ease; }
-.shell.diff-open { grid-template-columns: 292px minmax(460px, 1fr) minmax(360px, 42vw); }
+.shell { display: grid; grid-template-columns: 292px minmax(0, 1fr) 0; width: 100%; height: 100%; overflow: hidden; transition: grid-template-columns 180ms ease; }
+.shell.diff-open { grid-template-columns: 292px minmax(0, 1fr) clamp(340px, 38vw, 620px); }
 
 .sidebar { min-width: 0; z-index: 4; display: flex; flex-direction: column; overflow: hidden; background: var(--rail); color: var(--rail-text); }
 .brand { display: flex; align-items: center; gap: 11px; padding: 21px 18px 19px; }
@@ -313,18 +313,22 @@ dialog::backdrop { background: rgb(25 39 49 / 38%); backdrop-filter: blur(3px); 
 @keyframes pulse { 50% { opacity: .35; transform: scale(.75); } }
 @keyframes rise { from { opacity: 0; transform: translateY(5px); } }
 @keyframes pulse-ring { 50% { box-shadow: 0 0 0 7px rgb(242 169 126 / 5%); } }
-@media (max-width: 980px) {
-  .shell, .shell.diff-open { grid-template-columns: 252px minmax(420px, 1fr); }
-  .diff-panel { position: fixed; z-index: 8; top: 0; right: 0; bottom: 0; width: min(620px, 78vw); box-shadow: -18px 0 50px rgb(30 45 56 / 14%); }
+@media (max-width: 1100px) {
+  .shell { grid-template-columns: 252px minmax(0, 1fr) 0; }
+  .shell.diff-open { grid-template-columns: 252px minmax(0, 1fr) clamp(300px, 40vw, 440px); }
 }
-@media (max-width: 720px) {
-  .shell, .shell.diff-open { display: block; }
-  .conversation { height: 100%; }
+@media (max-width: 980px) {
+  .shell { grid-template-columns: minmax(0, 1fr) 0; }
+  .shell.diff-open { grid-template-columns: minmax(0, 1fr) clamp(320px, 40vw, 420px); }
   .sidebar { position: fixed; inset: 0 auto 0 0; width: min(292px, 86vw); transform: translateX(-102%); transition: transform 180ms ease; box-shadow: 18px 0 40px rgb(10 28 40 / 22%); }
   body.sidebar-open .sidebar { transform: none; }
   .sidebar-scrim { position: fixed; z-index: 3; inset: 0; width: 100%; border: 0; background: rgb(15 29 39 / 42%); }
   body.sidebar-open .sidebar-scrim { display: block; }
   .mobile-only { display: inline-grid; }
+}
+@media (max-width: 720px) {
+  .shell, .shell.diff-open { display: block; }
+  .conversation { height: 100%; }
   .conversation-header { min-height: 68px; padding: 10px 13px; }
   .header-tool { width: 34px; height: 34px; justify-content: center; padding: 0; overflow: hidden; font-size: 0; }
   .header-tool span { font-size: 13px; }
@@ -341,7 +345,7 @@ dialog::backdrop { background: rgb(25 39 49 / 38%); backdrop-filter: blur(3px); 
   .shortcut { display: none; }
   #composer-workspace { flex: 1; text-align: left; }
   .permission-mode { max-width: 126px; }
-  .diff-panel { width: 100%; transform: translateX(102%); }
+  .diff-panel { position: fixed; z-index: 8; inset: 0; width: 100%; box-shadow: -18px 0 50px rgb(30 45 56 / 14%); transform: translateX(102%); }
   .operations-manifest { grid-template-columns: 1fr; }
   .operations-gate { justify-items: start; }
   .field-grid { grid-template-columns: 1fr; gap: 5px; }

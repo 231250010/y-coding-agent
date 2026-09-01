@@ -136,6 +136,18 @@ def test_change_cards_request_their_own_turn_diff() -> None:
     assert "对话累计改动（旧记录）" in javascript
 
 
+def test_diff_panel_uses_adaptive_grid_without_covering_desktop_conversation() -> None:
+    css = asset("app.css")
+
+    assert ".shell { display: grid; grid-template-columns: 292px minmax(0, 1fr) 0;" in css
+    assert ".shell.diff-open { grid-template-columns: 292px minmax(0, 1fr) clamp(340px, 38vw, 620px); }" in css
+    assert ".shell.diff-open { grid-template-columns: 252px minmax(0, 1fr) clamp(300px, 40vw, 440px); }" in css
+    assert "@media (max-width: 980px)" in css
+    assert ".shell.diff-open { grid-template-columns: minmax(0, 1fr) clamp(320px, 40vw, 420px); }" in css
+    assert "@media (max-width: 720px)" in css
+    assert ".diff-panel { position: fixed; z-index: 8; inset: 0; width: 100%;" in css
+
+
 def test_devops_progress_rail_and_cancel_control_are_wired() -> None:
     html = asset("index.html")
     javascript = asset("app.js")

@@ -8,7 +8,7 @@ Coding Agent 只提供本机网页版。唯一产品入口是：
 coding-agent -> coding_agent.web:main
 ```
 
-HTTP 服务固定监听 `127.0.0.1`，浏览器负责项目、对话、审批、停止与 Diff 展示；模型请求、Agent 循环、文件和 Git 操作全部由本机 Python 进程执行。项目不包含桌面 GUI、终端 CLI、Web 框架或 Agent 框架。
+HTTP 服务固定监听 `127.0.0.1`，浏览器负责项目、对话、审批、停止与 Diff 展示；模型请求、Agent 循环、文件和 Git 操作全部由本机 Python 进程执行。桌面和平板上的 Diff 是网格第三列，中间对话区按剩余空间自适应；仅手机窄屏使用全屏预览。项目不包含桌面 GUI、终端 CLI、Web 框架或 Agent 框架。
 
 ## 模块职责
 
