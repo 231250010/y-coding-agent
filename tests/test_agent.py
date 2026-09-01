@@ -249,7 +249,8 @@ def test_completion_gate_requests_validation_and_accepts_fresh_evidence(
                     "c1",
                     "write_file",
                     {"path": "valid.py", "content": "answer = 42\n"},
-                )]
+                )],
+                reasoning_content="先创建目标文件",
             ),
             AssistantResponse("已经完成", reasoning_content="先总结当前修改"),
             AssistantResponse(
@@ -260,9 +261,13 @@ def test_completion_gate_requests_validation_and_accepts_fresh_evidence(
                         "argv": [sys.executable, "-m", "py_compile", "valid.py"],
                         "timeout_seconds": 10,
                     },
-                )]
+                )],
+                reasoning_content="执行修改后的语法检查",
             ),
-            AssistantResponse("已写入并通过语法检查"),
+            AssistantResponse(
+                "已写入并通过语法检查",
+                reasoning_content="整理最终验证结果",
+            ),
         ]
     )
     agent = CodingAgent(
@@ -277,6 +282,147 @@ def test_completion_gate_requests_validation_and_accepts_fresh_evidence(
     assert model.requests[2][0][-2]["reasoning_content"] == "先总结当前修改"
     assert agent.execution_state.outcome == "completed"
     assert not agent.execution_state.needs_validation
+
+
+def test_completion_gate_does_not_replay_final_draft_missing_reasoning(
+    tmp_path: Path,
+) -> None:
+    tracker = ConversationChangeTracker(tmp_path)
+    model = ScriptedModel(
+        [
+            AssistantResponse(
+                tool_calls=[call(
+                    "c1",
+                    "write_file",
+                    {"path": "valid.py", "content": "answer = 42\n"},
+                )],
+                reasoning_content="先创建文件",
+            ),
+            AssistantResponse("这是一段不能回放的最终草稿"),
+            AssistantResponse(
+                tool_calls=[call(
+                    "c2",
+                    "run_process",
+                    {
+                        "argv": [sys.executable, "-m", "py_compile", "valid.py"],
+                        "timeout_seconds": 10,
+                    },
+                )],
+                reasoning_content="按门禁运行语法检查",
+            ),
+            AssistantResponse("验证完成", reasoning_content="汇总验证结果"),
+        ]
+    )
+    agent = CodingAgent(
+        model,
+        ToolRegistry(tmp_path, approver=lambda *_args: True, change_tracker=tracker),
+        ContextManager(100_000),
+    )
+
+    assert agent.run("创建并验证文件") == "验证完成"
+    gate_request = model.requests[2][0]
+    assert gate_request[-1]["role"] == "system"
+    assert "完成门禁" in str(gate_request[-1]["content"])
+    assert all(
+        message.get("content") != "这是一段不能回放的最终草稿"
+        for message in gate_request
+    )
+
+
+def test_nonreplayable_final_is_visible_but_not_sent_on_next_user_turn(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.txt").write_text("hello", encoding="utf-8")
+    model = ScriptedModel(
+        [
+            AssistantResponse(
+                tool_calls=[call("c1", "read_file", {"path": "a.txt"})],
+                reasoning_content="先读取文件",
+            ),
+            AssistantResponse("第一轮可见回答，但缺少协议字段"),
+            AssistantResponse("第二轮回答", reasoning_content="回答后续问题"),
+        ]
+    )
+    agent = CodingAgent(model, ToolRegistry(tmp_path), ContextManager(100_000))
+
+    assert agent.run("读取") == "第一轮可见回答，但缺少协议字段"
+    assert all(
+        message.get("content") != "第一轮可见回答，但缺少协议字段"
+        for message in agent.history
+    )
+    assert agent.run("继续") == "第二轮回答"
+    assert all(
+        message.get("content") != "第一轮可见回答，但缺少协议字段"
+        for message in model.requests[2][0]
+    )
+
+
+def test_explicit_null_reasoning_is_replayed_without_fabrication(
+    tmp_path: Path,
+) -> None:
+    tracker = ConversationChangeTracker(tmp_path)
+    model = ScriptedModel(
+        [
+            AssistantResponse(
+                tool_calls=[call(
+                    "c1", "write_file", {"path": "a.txt", "content": "changed\n"}
+                )],
+                reasoning_content="先修改",
+            ),
+            AssistantResponse(
+                "服务端明确返回 null",
+                reasoning_content=None,
+                reasoning_content_present=True,
+            ),
+            AssistantResponse("明确说明未验证", reasoning_content="完成说明"),
+        ]
+    )
+    agent = CodingAgent(
+        model,
+        ToolRegistry(tmp_path, approver=lambda *_args: True, change_tracker=tracker),
+        ContextManager(100_000),
+    )
+
+    assert agent.run("修改").startswith("⚠️")
+    replayed = next(
+        message
+        for message in model.requests[2][0]
+        if message.get("content") == "服务端明确返回 null"
+    )
+    assert "reasoning_content" in replayed
+    assert replayed["reasoning_content"] is None
+
+
+def test_restore_history_removes_old_unreplayable_assistant_draft(
+    tmp_path: Path,
+) -> None:
+    agent = CodingAgent(
+        ScriptedModel([]), ToolRegistry(tmp_path), ContextManager(100_000)
+    )
+
+    agent.restore_history(
+        [
+            {"role": "system", "content": "old system"},
+            {"role": "user", "content": "修改文件"},
+            {
+                "role": "assistant",
+                "content": None,
+                "reasoning_content": "调用写入工具",
+                "tool_calls": [call(
+                    "c1", "write_file", {"path": "a.txt", "content": "x"}
+                ).as_message_dict()],
+            },
+            {"role": "tool", "tool_call_id": "c1", "content": '{"ok": true}'},
+            {"role": "assistant", "content": "缺少 reasoning 的旧草稿"},
+            {"role": "system", "content": "完成门禁：请继续验证"},
+        ]
+    )
+
+    assert all(
+        message.get("content") != "缺少 reasoning 的旧草稿"
+        for message in agent.history
+    )
+    assert agent.history[-1]["content"] == "完成门禁：请继续验证"
 
 
 def test_completion_gate_lists_project_validation_commands(tmp_path: Path) -> None:

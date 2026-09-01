@@ -171,6 +171,70 @@ def test_checkpoint_event_persists_agent_history_immediately(tmp_path: Path) -> 
     assert stored["tasks"][0]["history"] == history
 
 
+def test_streaming_turn_after_runtime_restart_drops_unreplayable_reasoning_draft(
+    tmp_path: Path,
+) -> None:
+    initial = WebRuntime(
+        settings(tmp_path), tmp_path, model_factory=lambda: ScriptedModel([])
+    )
+    project = initial.add_project(str(tmp_path))
+    task_payload = initial.new_conversation(project["id"])
+    task = initial._task(task_payload["id"])
+    task.history = [
+        {"role": "system", "content": "old system"},
+        {"role": "user", "content": "完成项目"},
+        {
+            "role": "assistant",
+            "content": None,
+            "reasoning_content": "先运行工具",
+            "tool_calls": [
+                ToolCall("c1", "list_files", "{}").as_message_dict()
+            ],
+        },
+        {"role": "tool", "tool_call_id": "c1", "content": '{"ok": true}'},
+        {"role": "assistant", "content": "缺少 reasoning 的最终草稿"},
+        {"role": "system", "content": "完成门禁：继续验证"},
+    ]
+    initial._save()
+
+    class RestartStreamingModel:
+        def complete_stream(
+            self,
+            messages: Sequence[Message],
+            _tools: Sequence[dict[str, Any]],
+            on_delta: Any,
+        ) -> AssistantResponse:
+            assert any(
+                message.get("role") == "assistant"
+                and "reasoning_content" in message
+                for message in messages
+            )
+            assert all(
+                message.get("role") != "assistant"
+                or "reasoning_content" in message
+                for message in messages
+            )
+            on_delta("恢复后")
+            return AssistantResponse(
+                "恢复后继续完成", reasoning_content="检查恢复后的协议历史"
+            )
+
+        def complete(self, *_args: Any, **_kwargs: Any) -> AssistantResponse:
+            raise AssertionError("恢复后的主请求应使用流式路径")
+
+    restored = WebRuntime(
+        settings(tmp_path), tmp_path, model_factory=RestartStreamingModel
+    )
+    restored.send_message(task.id, "继续")
+    finished = wait_until_idle(restored, task.id)
+
+    assert finished["entries"][-1]["text"] == "恢复后继续完成"
+    assert all(
+        message.get("content") != "缺少 reasoning 的最终草稿"
+        for message in restored._task(task.id).history
+    )
+
+
 def test_decision_summary_replaces_streaming_text_redacts_and_restores(
     tmp_path: Path,
 ) -> None:

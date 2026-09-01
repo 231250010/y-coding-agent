@@ -7,6 +7,9 @@ from openai import APIConnectionError
 from coding_agent.model import ModelError, OpenAIChatModel
 
 
+_MISSING = object()
+
+
 class FakeCompletions:
     def __init__(self, outcomes: list[object]) -> None:
         self.outcomes = outcomes
@@ -34,13 +37,12 @@ def response(
     *,
     content: str | None = "done",
     calls: list[object] | None = None,
-    reasoning_content: str | None = None,
+    reasoning_content: str | None | object = _MISSING,
 ) -> object:
-    message = SimpleNamespace(
-        content=content,
-        tool_calls=calls or [],
-        reasoning_content=reasoning_content,
-    )
+    fields: dict[str, object] = {"content": content, "tool_calls": calls or []}
+    if reasoning_content is not _MISSING:
+        fields["reasoning_content"] = reasoning_content
+    message = SimpleNamespace(**fields)
     return SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason="stop")])
 
 
@@ -49,13 +51,12 @@ def chunk(
     content: str | None = None,
     calls: list[object] | None = None,
     finish_reason: str | None = None,
-    reasoning_content: str | None = None,
+    reasoning_content: str | None | object = _MISSING,
 ) -> object:
-    delta = SimpleNamespace(
-        content=content,
-        tool_calls=calls or [],
-        reasoning_content=reasoning_content,
-    )
+    fields: dict[str, object] = {"content": content, "tool_calls": calls or []}
+    if reasoning_content is not _MISSING:
+        fields["reasoning_content"] = reasoning_content
+    delta = SimpleNamespace(**fields)
     return SimpleNamespace(
         choices=[SimpleNamespace(delta=delta, finish_reason=finish_reason)]
     )
@@ -99,6 +100,19 @@ def test_adapter_reads_reasoning_content_from_sdk_model_extra() -> None:
     assert model.complete([{"role": "user", "content": "分析"}]).reasoning_content == (
         "兼容字段"
     )
+
+
+def test_adapter_distinguishes_absent_and_explicit_null_reasoning_content() -> None:
+    absent_model, _ = fake_model([response(content="plain")])
+    null_model, _ = fake_model([response(content="thinking", reasoning_content=None)])
+
+    absent = absent_model.complete([{"role": "user", "content": "plain"}])
+    explicit_null = null_model.complete([{"role": "user", "content": "thinking"}])
+
+    assert absent.reasoning_content is None
+    assert absent.reasoning_content_present is False
+    assert explicit_null.reasoning_content is None
+    assert explicit_null.reasoning_content_present is True
 
 
 def test_adapter_omits_tools_for_summary_requests() -> None:
@@ -160,6 +174,23 @@ def test_streaming_adapter_emits_text_and_reassembles_tool_calls() -> None:
     assert result.reasoning_content == "先分析再决定"
     assert "".join(deltas) == "正在读取"
     assert completions.requests[0]["stream"] is True
+
+
+def test_streaming_adapter_distinguishes_missing_and_null_reasoning_fields() -> None:
+    absent_model, _ = fake_model([[chunk(content="plain", finish_reason="stop")]])
+    null_model, _ = fake_model(
+        [[
+            chunk(reasoning_content=None),
+            chunk(content="answer", finish_reason="stop"),
+        ]]
+    )
+
+    absent = absent_model.complete_stream([], None, lambda _delta: None)
+    explicit_null = null_model.complete_stream([], None, lambda _delta: None)
+
+    assert absent.reasoning_content_present is False
+    assert explicit_null.reasoning_content is None
+    assert explicit_null.reasoning_content_present is True
 
 
 def test_streaming_adapter_propagates_callback_abort_without_retry() -> None:

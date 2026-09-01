@@ -39,6 +39,11 @@ class AssistantResponse:
     tool_calls: Sequence[ToolCall] = field(default_factory=tuple)
     finish_reason: str | None = None
     reasoning_content: str | None = None
+    reasoning_content_present: bool = False
+
+    def __post_init__(self) -> None:
+        if self.reasoning_content is not None and not self.reasoning_content_present:
+            object.__setattr__(self, "reasoning_content_present", True)
 
 
 class ModelError(RuntimeError):
@@ -123,13 +128,15 @@ class OpenAIChatModel:
                     for call in (message.tool_calls or [])
                     if call.type == "function"
                 )
+                reasoning_present, reasoning_content = self._optional_string_field(
+                    message, "reasoning_content"
+                )
                 return AssistantResponse(
                     content=message.content,
                     tool_calls=calls,
                     finish_reason=choice.finish_reason,
-                    reasoning_content=self._optional_string_field(
-                        message, "reasoning_content"
-                    ),
+                    reasoning_content=reasoning_content,
+                    reasoning_content_present=reasoning_present,
                 )
             except (AuthenticationError, BadRequestError) as exc:
                 raise ModelError(f"模型请求不可重试: {exc}") from exc
@@ -165,6 +172,7 @@ class OpenAIChatModel:
                 stream = self._client.chat.completions.create(**request)
                 content_parts: list[str] = []
                 reasoning_parts: list[str] = []
+                reasoning_content_present = False
                 tool_parts: dict[int, dict[str, str]] = {}
                 finish_reason: str | None = None
                 for chunk in stream:
@@ -179,8 +187,11 @@ class OpenAIChatModel:
                     content = getattr(delta, "content", None) if delta else None
                     if isinstance(content, str) and content:
                         content_parts.append(content)
-                    reasoning = self._optional_string_field(
+                    reasoning_present, reasoning = self._optional_string_field(
                         delta, "reasoning_content"
+                    )
+                    reasoning_content_present = (
+                        reasoning_content_present or reasoning_present
                     )
                     if reasoning:
                         reasoning_parts.append(reasoning)
@@ -221,6 +232,7 @@ class OpenAIChatModel:
                     tool_calls=tuple(calls),
                     finish_reason=finish_reason,
                     reasoning_content="".join(reasoning_parts) or None,
+                    reasoning_content_present=reasoning_content_present,
                 )
             except _StreamCallbackAbort as exc:
                 raise exc.original
@@ -257,18 +269,30 @@ class OpenAIChatModel:
             raise _StreamCallbackAbort(exc) from exc
 
     @staticmethod
-    def _optional_string_field(value: Any, name: str) -> str | None:
-        """Read an OpenAI-compatible extension field without SDK coupling."""
+    def _optional_string_field(value: Any, name: str) -> tuple[bool, str | None]:
+        """Return extension-field presence and value without SDK coupling."""
         if value is None:
-            return None
+            return False, None
         if isinstance(value, dict):
+            present = name in value
             candidate = value.get(name)
         else:
-            candidate = getattr(value, name, None)
-            if candidate is None:
-                model_extra = getattr(value, "model_extra", None)
-                candidate = model_extra.get(name) if isinstance(model_extra, dict) else None
-        return candidate if isinstance(candidate, str) else None
+            model_extra = getattr(value, "model_extra", None)
+            fields_set = getattr(value, "model_fields_set", None)
+            has_sdk_metadata = isinstance(model_extra, dict) or isinstance(
+                fields_set, (set, frozenset)
+            )
+            present = bool(
+                (isinstance(model_extra, dict) and name in model_extra)
+                or (isinstance(fields_set, (set, frozenset)) and name in fields_set)
+            )
+            if not has_sdk_metadata:
+                present = hasattr(value, name)
+            if isinstance(model_extra, dict) and name in model_extra:
+                candidate = model_extra.get(name)
+            else:
+                candidate = getattr(value, name, None)
+        return present, candidate if isinstance(candidate, str) else None
 
 
 class _StreamCallbackAbort(Exception):

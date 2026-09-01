@@ -84,7 +84,7 @@ class CodingAgent:
             restored[0] = {"role": "system", "content": self.system_prompt}
         else:
             restored.insert(0, {"role": "system", "content": self.system_prompt})
-        self.history = restored
+        self.history = self._drop_unreplayable_reasoning_messages(restored)
         self._sync_task_list_anchor()
 
     def run(self, task: str) -> str:
@@ -108,19 +108,7 @@ class CodingAgent:
                 self._checkpoint()
             response = self._complete_model(step)
             self._check_cancelled()
-            self._append_assistant(response)
-
-            if response.tool_calls and (response.content or "").strip():
-                self.on_event(
-                    "decision_summary",
-                    {
-                        "content": (response.content or "").strip()[
-                            :MAX_DECISION_SUMMARY_CHARS
-                        ],
-                        "step": step,
-                        "tools": [call.name for call in response.tool_calls],
-                    },
-                )
+            replayable = self._response_is_replayable(response)
 
             if not response.tool_calls:
                 content = (response.content or "").strip()
@@ -133,6 +121,11 @@ class CodingAgent:
                     and step < self.max_steps
                 ):
                     completion_reminded = True
+                    # A rejected final draft is not automatically safe protocol
+                    # history. DeepSeek thinking requires the original
+                    # reasoning_content on every tools-enabled continuation.
+                    if replayable:
+                        self._append_assistant(response)
                     self.history.append(
                         {
                             "role": "system",
@@ -141,6 +134,8 @@ class CodingAgent:
                     )
                     self._checkpoint()
                     continue
+                if replayable:
+                    self._append_assistant(response)
                 # Report each new evidence gap once. A later unrelated user turn
                 # should not inherit the same warning indefinitely.
                 verified = not self.execution_state.has_unreported_evidence_gap
@@ -157,6 +152,26 @@ class CodingAgent:
                 )
                 self._checkpoint()
                 return content
+
+            if not replayable:
+                self.execution_state.mark_failed()
+                raise AgentStopped(
+                    "模型返回了工具调用，但缺少 thinking 模式续轮所需的 "
+                    "reasoning_content；为避免不可安全回放和重复副作用，工具未执行"
+                )
+
+            self._append_assistant(response)
+            if (response.content or "").strip():
+                self.on_event(
+                    "decision_summary",
+                    {
+                        "content": (response.content or "").strip()[
+                            :MAX_DECISION_SUMMARY_CHARS
+                        ],
+                        "step": step,
+                        "tools": [call.name for call in response.tool_calls],
+                    },
+                )
 
             for call, result in self._execute_calls(response.tool_calls):
                 try:
@@ -244,14 +259,55 @@ class CodingAgent:
 
     def _append_assistant(self, response: AssistantResponse) -> None:
         message: Message = {"role": "assistant", "content": response.content}
-        if response.reasoning_content is not None:
+        if response.reasoning_content_present:
             # DeepSeek thinking requires every assistant reasoning payload to be
-            # replayed unchanged whenever that message remains in history. This
-            # also covers internal continuation such as the completion gate.
+            # replayed unchanged, including an explicit null value, whenever
+            # that message remains in a tools-enabled history.
             message["reasoning_content"] = response.reasoning_content
         if response.tool_calls:
             message["tool_calls"] = [call.as_message_dict() for call in response.tool_calls]
         self.history.append(message)
+
+    def _response_is_replayable(self, response: AssistantResponse) -> bool:
+        return (
+            response.reasoning_content_present
+            or not self._reasoning_replay_required(self.history)
+        )
+
+    @staticmethod
+    def _reasoning_replay_required(messages: Sequence[Message]) -> bool:
+        return any(
+            message.get("role") == "assistant"
+            and "reasoning_content" in message
+            for message in messages
+        )
+
+    @classmethod
+    def _drop_unreplayable_reasoning_messages(
+        cls, messages: Sequence[Message]
+    ) -> list[Message]:
+        if not cls._reasoning_replay_required(messages):
+            return [dict(message) for message in messages]
+        invalid_tool_call_ids: set[str] = set()
+        restored: list[Message] = []
+        for message in messages:
+            if (
+                message.get("role") == "assistant"
+                and "reasoning_content" not in message
+            ):
+                raw_calls = message.get("tool_calls")
+                if isinstance(raw_calls, list):
+                    for call in raw_calls:
+                        if isinstance(call, dict) and isinstance(call.get("id"), str):
+                            invalid_tool_call_ids.add(call["id"])
+                continue
+            if (
+                message.get("role") == "tool"
+                and message.get("tool_call_id") in invalid_tool_call_ids
+            ):
+                continue
+            restored.append(dict(message))
+        return restored
 
     def _execute_call(self, name: str, raw_arguments: str) -> ToolResult:
         try:
