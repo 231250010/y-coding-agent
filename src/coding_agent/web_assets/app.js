@@ -251,9 +251,32 @@ function renderSidebar() {
   for (const task of state.tasks.filter((item) => !item.project_id)) ui.taskList.append(taskNode(task));
 }
 
-function messageNode(entry) {
+function messageNode(entry, options = {}) {
   const article = element("article", `message ${entry.kind}`);
   if (entry.streaming) article.classList.add("streaming");
+  if (entry.kind === "decision_summary") {
+    const card = element("details", "decision-card");
+    card.dataset.entryId = entry.id || "";
+    card.open = Boolean(options.expanded);
+    const head = element("summary", "decision-head");
+    const marker = element("span", "decision-marker");
+    const heading = element("span", "decision-heading");
+    heading.append(
+      element("strong", "", `决策摘要${entry.step ? ` ${entry.step}` : ""}`),
+      element("small", "", (entry.tools || []).join(" · ") || "准备下一步行动"),
+    );
+    const toggle = element("span", "decision-toggle");
+    const syncDecisionState = () => {
+      marker.textContent = card.open ? "▸" : "✓";
+      toggle.textContent = card.open ? "收起" : "展开";
+    };
+    syncDecisionState();
+    card.addEventListener("toggle", syncDecisionState);
+    head.append(marker, heading, toggle);
+    card.append(head, element("div", "decision-body", entry.text));
+    article.append(card);
+    return article;
+  }
   const labels = { assistant: "小码", tool: "本地工具", error: "运行错误", system: "系统" };
   article.append(element("p", "message-label", labels[entry.kind] || "你"));
   const body = element("div", "message-body");
@@ -301,20 +324,28 @@ function updateStreamingMessage(text) {
 function renderTranscript(task, streaming) {
   const shouldFollow = transcriptTaskId !== task.id || isTranscriptNearBottom();
   const nextKeys = task.entries.map(transcriptEntryKey);
+  const latestDecision = [...task.entries].reverse().find((entry) => entry.kind === "decision_summary");
+  const latestDecisionId = latestDecision && latestDecision.id;
   const canAppend = transcriptTaskId === task.id
     && renderedEntryKeys.length <= nextKeys.length
     && renderedEntryKeys.every((key, index) => key === nextKeys[index]);
 
   if (!canAppend) {
-    ui.transcript.replaceChildren(...task.entries.map(messageNode));
+    ui.transcript.replaceChildren(...task.entries.map((entry) => messageNode(entry, {
+      expanded: entry.id === latestDecisionId,
+    })));
     streamingMessage = null;
     lastStreamingText = "";
   } else if (nextKeys.length > renderedEntryKeys.length) {
+    const additions = task.entries.slice(renderedEntryKeys.length);
+    if (additions.some((entry) => entry.kind === "decision_summary")) {
+      for (const card of ui.transcript.querySelectorAll(".decision-card[open]")) card.open = false;
+    }
     if (streamingMessage) streamingMessage.remove();
     streamingMessage = null;
     lastStreamingText = "";
-    for (const entry of task.entries.slice(renderedEntryKeys.length)) {
-      ui.transcript.append(messageNode(entry));
+    for (const entry of additions) {
+      ui.transcript.append(messageNode(entry, { expanded: entry.id === latestDecisionId }));
     }
   }
 

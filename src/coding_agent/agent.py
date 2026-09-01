@@ -16,6 +16,7 @@ from .tools import ToolResult
 
 
 EventCallback = Callable[[str, dict[str, Any]], None]
+MAX_DECISION_SUMMARY_CHARS = 500
 
 
 class AgentStopped(RuntimeError):
@@ -100,6 +101,18 @@ class CodingAgent:
             response = self._complete_model(step)
             self._check_cancelled()
             self._append_assistant(response)
+
+            if response.tool_calls and (response.content or "").strip():
+                self.on_event(
+                    "decision_summary",
+                    {
+                        "content": (response.content or "").strip()[
+                            :MAX_DECISION_SUMMARY_CHARS
+                        ],
+                        "step": step,
+                        "tools": [call.name for call in response.tool_calls],
+                    },
+                )
 
             if not response.tool_calls:
                 content = (response.content or "").strip()

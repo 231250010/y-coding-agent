@@ -135,6 +135,20 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .message-body.markdown { white-space: normal; overflow-wrap: break-word; }
 .message.streaming .message-label::after { content: " · LIVE"; color: var(--accent-dark); font-family: var(--mono); font-size: 9px; letter-spacing: .08em; }
 .message.streaming .message-body::after { content: ""; display: inline-block; width: 7px; height: 1.05em; margin-left: 4px; border-radius: 2px; background: var(--accent-dark); vertical-align: -.18em; animation: stream-cursor 850ms steps(1) infinite; }
+.message.decision_summary { max-width: 780px; margin-bottom: 18px; }
+.decision-card { overflow: hidden; border: 1px solid #d7dee1; border-left: 3px solid #6f8d9d; border-radius: 10px 10px 10px 4px; background: rgb(255 255 255 / 66%); }
+.decision-head { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: center; gap: 9px; padding: 10px 12px; cursor: pointer; list-style: none; }
+.decision-head::-webkit-details-marker { display: none; }
+.decision-head:hover { background: #f0f4f5; }
+.decision-head:focus-visible { outline: 3px solid rgb(242 169 126 / 55%); outline-offset: -3px; }
+.decision-marker { display: grid; place-items: center; width: 19px; height: 19px; border: 1px solid #9fb0b9; border-radius: 50%; color: #567486; font-family: var(--mono); font-size: 9px; font-weight: 800; }
+.decision-heading { display: grid; min-width: 0; gap: 2px; }
+.decision-heading strong { color: #304957; font-size: 11px; }
+.decision-heading small { overflow: hidden; color: var(--muted); font-family: var(--mono); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.decision-toggle { color: #70808a; font-size: 9px; }
+.decision-card[open] { border-left-color: var(--accent-dark); background: #fffdf9; box-shadow: 0 8px 22px rgb(37 57 69 / 6%); }
+.decision-card[open] .decision-marker { border-color: var(--accent); background: #fff0e6; color: var(--accent-dark); }
+.decision-body { margin: 0 12px 12px 43px; padding-top: 10px; border-top: 1px solid #e2e6e7; color: #455963; font-size: 12px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
 .markdown > :first-child { margin-top: 0; }
 .markdown > :last-child { margin-bottom: 0; }
 .markdown p { margin: 0 0 12px; }

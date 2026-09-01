@@ -92,6 +92,53 @@ def test_single_tool_round_trip(tmp_path: Path) -> None:
     assert second_request[-1]["tool_call_id"] == "c1"
 
 
+def test_tool_call_content_emits_bounded_decision_summary_before_tool(
+    tmp_path: Path,
+) -> None:
+    events: list[tuple[str, dict[str, Any]]] = []
+    response = AssistantResponse(
+        "目标：检查工作区。\n依据：用户要求先了解代码。\n下一步：列出文件。" + "补" * 600,
+        tool_calls=[call("c1", "list_files", {})],
+        reasoning_content="不可见的内部推理",
+    )
+    agent = CodingAgent(
+        ScriptedModel([response, AssistantResponse("检查完成")]),
+        ToolRegistry(tmp_path),
+        ContextManager(100_000),
+        on_event=lambda name, data: events.append((name, data)),
+    )
+
+    assert agent.run("检查") == "检查完成"
+    names = [name for name, _data in events]
+    assert names.index("decision_summary") < names.index("tool_start")
+    decision = next(data for name, data in events if name == "decision_summary")
+    assert len(decision["content"]) == 500
+    assert decision["step"] == 1
+    assert decision["tools"] == ["list_files"]
+    assert "不可见的内部推理" not in json.dumps(decision, ensure_ascii=False)
+
+
+def test_tool_call_without_visible_content_skips_decision_summary(tmp_path: Path) -> None:
+    events: list[tuple[str, dict[str, Any]]] = []
+    agent = CodingAgent(
+        ScriptedModel(
+            [
+                AssistantResponse(
+                    tool_calls=[call("c1", "list_files", {})],
+                    reasoning_content="只用于协议回传",
+                ),
+                AssistantResponse("完成"),
+            ]
+        ),
+        ToolRegistry(tmp_path),
+        ContextManager(100_000),
+        on_event=lambda name, data: events.append((name, data)),
+    )
+
+    assert agent.run("检查") == "完成"
+    assert all(name != "decision_summary" for name, _data in events)
+
+
 def test_deepseek_reasoning_content_is_replayed_with_assistant_tool_call(
     tmp_path: Path,
 ) -> None:

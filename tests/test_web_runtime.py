@@ -128,6 +128,83 @@ def test_checkpoint_event_persists_agent_history_immediately(tmp_path: Path) -> 
     assert stored["tasks"][0]["history"] == history
 
 
+def test_decision_summary_replaces_streaming_text_redacts_and_restores(
+    tmp_path: Path,
+) -> None:
+    runtime = WebRuntime(settings(tmp_path), tmp_path, model_factory=lambda: ScriptedModel([]))
+    task = runtime.new_conversation()
+    runtime._handle_agent_event(
+        task["id"], "assistant_delta", {"content": "流式行动草稿"}
+    )
+
+    runtime._handle_agent_event(
+        task["id"],
+        "decision_summary",
+        {
+            "content": (
+                "目标：检查配置。\n依据：api_key=test-key，"
+                "Authorization: Bearer private-token。\n下一步：读取文件。" + "补" * 600
+            ),
+            "step": 2,
+            "tools": ["read_file"],
+            "reasoning_content": "绝不能下发",
+        },
+    )
+
+    snapshot = next(
+        item for item in runtime.snapshot()["tasks"] if item["id"] == task["id"]
+    )
+    decision = snapshot["entries"][-1]
+    assert snapshot["streaming_content"] == ""
+    assert decision["kind"] == "decision_summary"
+    assert decision["step"] == 2
+    assert decision["tools"] == ["read_file"]
+    assert len(decision["text"]) <= 500
+    assert "test-key" not in decision["text"]
+    assert "private-token" not in decision["text"]
+    assert "绝不能下发" not in json.dumps(snapshot, ensure_ascii=False)
+
+    restored = WebRuntime(
+        settings(tmp_path), tmp_path, model_factory=lambda: ScriptedModel([])
+    )
+    restored_decision = restored.snapshot()["tasks"][0]["entries"][-1]
+    assert restored_decision["kind"] == "decision_summary"
+    assert restored_decision["step"] == 2
+    assert restored_decision["tools"] == ["read_file"]
+
+
+def test_agent_run_orders_decision_summary_before_tool_result_and_final_answer(
+    tmp_path: Path,
+) -> None:
+    model = ScriptedModel(
+        [
+            AssistantResponse(
+                "目标：了解工作区。\n依据：尚未读取目录。\n下一步：调用 list_files。",
+                tool_calls=[ToolCall("inspect-1", "list_files", "{}")],
+                reasoning_content="内部推理不应进入页面",
+            ),
+            AssistantResponse("工作区检查完成。"),
+        ]
+    )
+    runtime = WebRuntime(settings(tmp_path), tmp_path, model_factory=lambda: model)
+    project = runtime.add_project(str(tmp_path))
+    task = runtime.new_conversation(project["id"])
+
+    runtime.send_message(task["id"], "检查工作区")
+    finished = wait_until_idle(runtime, task["id"])
+
+    assert [entry["kind"] for entry in finished["entries"]] == [
+        "user",
+        "decision_summary",
+        "tool",
+        "assistant",
+    ]
+    assert finished["entries"][1]["tools"] == ["list_files"]
+    assert finished["entries"][1]["step"] == 1
+    assert finished["entries"][-1]["text"] == "工作区检查完成。"
+    assert "内部推理不应进入页面" not in json.dumps(finished, ensure_ascii=False)
+
+
 def test_task_list_tool_updates_anchor_and_persists_across_runtime_restart(
     tmp_path: Path,
 ) -> None:

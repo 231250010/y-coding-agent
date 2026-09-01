@@ -97,7 +97,7 @@ python -m pip install -e ".[dev]"
 - `CODING_AGENT_BASE_URL`：兼容网关地址。
 - `CODING_AGENT_CONTEXT_TOKENS`：上下文预算，默认 `32000`。
 
-兼容 DeepSeek thinking 模式返回的 `reasoning_content`。非流式响应会保存该字段，流式响应会逐片重组；只要 assistant 消息仍在历史中，后续请求就会原样回传其 `reasoning_content`，包括工具调用、完成门禁和后续用户轮次。思维内容不会作为可见回答流式展示。
+兼容 DeepSeek thinking 模式返回的 `reasoning_content`。非流式响应会保存该字段，流式响应会逐片重组；只要 assistant 消息仍在历史中，后续请求就会原样回传其 `reasoning_content`，包括工具调用、完成门禁和后续用户轮次。原始思维内容不会发送到浏览器。模型在工具调用响应的可见 `content` 中给出简短的目标、依据和下一步动作时，Agent 会将其脱敏、限制为最多 500 个字符并保存成可折叠的“决策摘要”；没有可见内容时不额外生成摘要，也不会增加一次模型调用。
 
 也可以在网页的“模型与运行设置”中保存本机配置。页面永远不会把已经配置的 API Key 返回给浏览器；新 Key 只有在明确勾选“保存到本地配置”后才会写入 `.coding-agent/config.json`。
 

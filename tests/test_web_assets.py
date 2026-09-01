@@ -119,6 +119,24 @@ def test_frontend_streams_state_with_sse_and_renders_partial_assistant_text() ->
     assert "stream-cursor" in css
 
 
+def test_frontend_renders_accessible_collapsible_decision_summaries() -> None:
+    javascript = asset("app.js")
+    css = asset("app.css")
+
+    assert 'entry.kind === "decision_summary"' in javascript
+    assert 'element("details", "decision-card")' in javascript
+    assert 'element("summary", "decision-head")' in javascript
+    assert 'card.addEventListener("toggle", syncDecisionState)' in javascript
+    assert 'querySelectorAll(".decision-card[open]")' in javascript
+    for selector in [
+        ".message.decision_summary",
+        ".decision-card",
+        ".decision-head",
+        ".decision-body",
+    ]:
+        assert selector in css
+
+
 def test_ui_controls_share_one_explicit_font_family() -> None:
     css = asset("app.css")
 

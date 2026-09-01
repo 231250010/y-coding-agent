@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 import uuid
@@ -29,6 +30,17 @@ from .task_list import TaskListState
 from .providers import build_default_tool_provider
 
 
+MAX_DECISION_SUMMARY_CHARS = 500
+_SENSITIVE_ASSIGNMENT = re.compile(
+    r"(?i)\b(api[_-]?key|token|password|secret|credential)\b"
+    r"(\s*[=:]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,，;；]+)"
+)
+_AUTHORIZATION_VALUE = re.compile(
+    r"(?i)\bauthorization\b(\s*[=:]\s*)(?:bearer\s+)?[^\s,，;；]+"
+)
+_BEARER_TOKEN = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
+
+
 class RuntimeNotFound(LookupError):
     """Raised when a requested project, conversation, approval, or change does not exist."""
 
@@ -44,6 +56,8 @@ class ChatEntry:
     change_paths: tuple[str, ...] = ()
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     file_changes: list[dict[str, Any]] = field(default_factory=list)
+    step: int | None = None
+    tools: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -829,6 +843,30 @@ class WebRuntime:
                     self._last_stream_notice[task.id] = now
                     self._touch()
                 return
+            elif name == "decision_summary":
+                content = data.get("content")
+                if isinstance(content, str) and content.strip():
+                    raw_tools = data.get("tools")
+                    safe_tools = (
+                        tuple(
+                            tool[:100]
+                            for tool in raw_tools[:16]
+                            if isinstance(tool, str) and tool
+                        )
+                        if isinstance(raw_tools, list)
+                        else ()
+                    )
+                    step = data.get("step")
+                    task.streaming_content = ""
+                    task.entries.append(
+                        ChatEntry(
+                            "decision_summary",
+                            self._visible_decision_summary(content),
+                            step=step if isinstance(step, int) and step > 0 else None,
+                            tools=safe_tools,
+                        )
+                    )
+                    task.status = "决策摘要已生成，准备执行工具"
             elif name == "summary_start":
                 task.status = "正在压缩上下文"
             elif name == "checkpoint":
@@ -1019,6 +1057,8 @@ class WebRuntime:
                                 "text": entry.text,
                                 "change_paths": list(entry.change_paths),
                                 "file_changes": entry.file_changes,
+                                "step": entry.step,
+                                "tools": list(entry.tools),
                             }
                             for entry in task.entries
                         ],
@@ -1095,6 +1135,8 @@ class WebRuntime:
                     "text": entry.text,
                     "change_paths": list(entry.change_paths),
                     "change_scope": "turn" if entry.file_changes else "conversation",
+                    "step": entry.step,
+                    "tools": list(entry.tools),
                 }
                 for entry in task.entries
             ],
@@ -1215,9 +1257,39 @@ class WebRuntime:
                     tuple(path for path in paths if isinstance(path, str)) if isinstance(paths, list) else (),
                     id=str(raw.get("id") or uuid.uuid4().hex),
                     file_changes=stored_changes,
+                    step=(
+                        raw.get("step")
+                        if isinstance(raw.get("step"), int) and raw.get("step") > 0
+                        else None
+                    ),
+                    tools=(
+                        tuple(
+                            tool
+                            for tool in raw.get("tools", [])[:16]
+                            if isinstance(tool, str) and tool
+                        )
+                        if isinstance(raw.get("tools"), list)
+                        else ()
+                    ),
                 )
             )
         return entries
+
+    def _visible_decision_summary(self, value: str) -> str:
+        redacted = value.strip()
+        secret = self.settings.api_key.strip()
+        if secret:
+            redacted = redacted.replace(secret, "[REDACTED]")
+        redacted = _AUTHORIZATION_VALUE.sub(
+            lambda match: f"authorization{match.group(1)}[REDACTED]",
+            redacted,
+        )
+        redacted = _BEARER_TOKEN.sub("Bearer [REDACTED]", redacted)
+        redacted = _SENSITIVE_ASSIGNMENT.sub(
+            lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]",
+            redacted,
+        )
+        return redacted[:MAX_DECISION_SUMMARY_CHARS]
 
     @staticmethod
     def _collapse_legacy_changes(entries: list[ChatEntry]) -> list[str]:
