@@ -51,6 +51,7 @@
 
 - `agent.py`：自主循环、模型输出解析、工具结果回传和终止条件。
 - `execution_state.py`：独立记录修改版本、验证尝试和最终结果证据。
+- `project_policy.py`：有界加载项目规则与参数数组式验证清单。
 - `model.py`：`openai` 基础客户端的薄适配层，不包含 Agent 逻辑。
 - `tools.py`：文件、搜索、批量编辑和受控命令工具的 Schema、校验与执行。
 - `skills.py`：项目级/本机级 Skill 发现、描述菜单、`SKILL.md` 和包内资源按需加载。
@@ -101,7 +102,24 @@ python -m pip install -e ".[dev]"
 
 也可以在网页的“模型与运行设置”中保存本机配置。页面永远不会把已经配置的 API Key 返回给浏览器；新 Key 只有在明确勾选“保存到本地配置”后才会写入 `.coding-agent/config.json`。
 
-`.coding-agent/`、`.env` 和虚拟环境均已加入 `.gitignore`。真实凭据不得写入源码、README、测试数据、日志或提交记录。
+除可版本化的 `.coding-agent/rules.md` 外，`.coding-agent/` 中的本机配置、`.env` 和虚拟环境均已加入 `.gitignore`。真实凭据不得写入源码、README、测试数据、日志或提交记录。
+
+## 项目规则与验证清单
+
+项目可以在 `.coding-agent/rules.md` 中保存团队约定，例如目录职责、代码风格和必需的验证流程。Agent 在每个任务开始时从任务实际工作区加载该文件，因此 worktree 对话读取的是隔离工作区中的版本。规则必须是工作区内不超过 32 KB 的 UTF-8 普通文本；越界符号链接、二进制内容和超限文件会被拒绝。它属于项目级补充上下文，不能覆盖系统安全规则、审批边界、当前用户目标或凭据保护要求。
+
+项目根目录已有的 `coding-agent.toml` 还可以声明完成前优先运行的验证命令：
+
+```toml
+validation = [
+  ["python", "-m", "pytest", "-q"],
+  ["python", "-m", "compileall", "-q", "src"],
+]
+```
+
+每项必须是 shell-free 的参数数组，最多 12 条、每条最多 30 项。Shell、提权解释器、内联 `python -c` 和其他被安全策略拒绝的命令不能写入清单；重复项会合并。Agent 产生文件修改却准备直接结束时，完成门禁会把这些命令作为 `run_process.argv` 提示给模型。程序不会暗中自动执行它们：每次调用仍经过现有命令分类、权限模式与人工审批，只有完全匹配声明 argv 且成功返回的 `run_process` 才会登记为该修改版本的验证证据。失败、拒绝或客观上不适用时，最终回答必须明确标记未验证。
+
+`.coding-agent/rules.md` 可正常加入 Git；`coding-agent.toml` 本身也不包含凭据，可以和下文 DevOps 配置共用同一个文件。API Key、Token、密码等仍只能放在环境变量或未入库的本机配置中。
 
 ## Skill 与 MCP 扩展
 

@@ -84,6 +84,37 @@ def test_failed_tool_that_changed_disk_still_advances_mutation_revision() -> Non
     assert state.needs_validation is True
 
 
+def test_configured_validation_requires_exact_run_process_argv() -> None:
+    state = ExecutionState()
+    state.configure_validation_commands((("custom-check", "--verify"),))
+    state.observe(
+        "write_file", {}, ToolResult(True, changes=ChangeSet(("a.py",)))
+    )
+
+    state.observe(
+        "run_process",
+        {"argv": ["custom-check", "--other"]},
+        ToolResult(True, "not the declared check"),
+    )
+    assert state.needs_validation is True
+    assert state.validation_attempts == 0
+
+    state.observe(
+        "run_command",
+        {"command": "custom-check --verify"},
+        ToolResult(True, "shell form is not accepted"),
+    )
+    assert state.needs_validation is True
+
+    state.observe(
+        "run_process",
+        {"argv": ["custom-check", "--verify"]},
+        ToolResult(True, "declared check passed"),
+    )
+    assert state.needs_validation is False
+    assert state.validations[-1].command == ("custom-check", "--verify")
+
+
 def test_execution_state_storage_round_trip_is_bounded() -> None:
     state = ExecutionState()
     state.observe(

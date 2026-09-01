@@ -23,7 +23,8 @@ from .execution_state import ExecutionState
 from .local_settings import LocalSettings
 from .model import ChatModel, ModelError, OpenAIChatModel
 from .permissions import PERMISSION_MODES, normalize_permission_mode
-from .prompts import PROJECTLESS_SYSTEM_PROMPT, SYSTEM_PROMPT
+from .project_policy import load_project_policy
+from .prompts import PROJECTLESS_SYSTEM_PROMPT, SYSTEM_PROMPT, with_project_rules
 from .safety import RiskLevel
 from .session_store import SessionStore
 from .task_list import TaskListState
@@ -762,6 +763,7 @@ class WebRuntime:
     def _make_agent(self, task: WebTask) -> CodingAgent:
         project = self._project(task.project_id) if task.project_id else None
         workspace = self._task_workspace(task, project)
+        project_policy = load_project_policy(workspace) if workspace else None
         # Config validates model settings and requires a directory. The settings
         # root is used only for that validation in projectless chat; the tool
         # provider still receives None, so local tools cannot fall back here.
@@ -810,10 +812,17 @@ class WebRuntime:
             max_steps=config.max_steps,
             on_event=lambda name, data: self._handle_agent_event(task.id, name, data),
             is_cancelled=task.cancel_event.is_set,
-            system_prompt=SYSTEM_PROMPT if workspace else PROJECTLESS_SYSTEM_PROMPT,
+            system_prompt=(
+                with_project_rules(SYSTEM_PROMPT, project_policy.rules)
+                if project_policy
+                else PROJECTLESS_SYSTEM_PROMPT
+            ),
             task_list=task.task_list,
             model_call_lock=model_call_lock,
             execution_state=task.execution_state,
+            validation_commands=(
+                project_policy.validation_commands if project_policy else ()
+            ),
         )
 
     def _handle_task_list_update(

@@ -41,6 +41,14 @@ class ExecutionState:
     reported_validation_attempt: int = 0
     validations: list[ValidationRecord] = field(default_factory=list)
     outcome: str = "idle"
+    configured_validation_commands: tuple[tuple[str, ...], ...] = field(
+        default=(), repr=False
+    )
+
+    def configure_validation_commands(
+        self, commands: Sequence[Sequence[str]]
+    ) -> None:
+        self.configured_validation_commands = tuple(tuple(command) for command in commands)
 
     def begin_run(self) -> None:
         self.outcome = "running"
@@ -206,8 +214,8 @@ class ExecutionState:
     def _non_negative_int(value: Any) -> int:
         return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
-    @staticmethod
     def _validation_command(
+        self,
         tool_name: str, arguments: dict[str, Any]
     ) -> tuple[str, ...] | None:
         if tool_name == "run_process":
@@ -215,7 +223,10 @@ class ExecutionState:
             if not isinstance(raw, list):
                 return None
             command = tuple(item for item in raw if isinstance(item, str))
-            return command if ExecutionState._is_validation_argv(command) else None
+            return command if (
+                command in self.configured_validation_commands
+                or ExecutionState._is_validation_argv(command)
+            ) else None
         if tool_name == "run_command":
             raw = arguments.get("command")
             if not isinstance(raw, str) or _SHELL_COMPOSITION.search(raw):

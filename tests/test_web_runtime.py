@@ -112,6 +112,49 @@ def test_project_and_conversation_are_created_for_existing_directory(tmp_path: P
     assert "api_key" not in state["settings"]
 
 
+def test_project_policy_is_loaded_into_workspace_agent(tmp_path: Path) -> None:
+    rules_dir = tmp_path / ".coding-agent"
+    rules_dir.mkdir()
+    (rules_dir / "rules.md").write_text(
+        "提交前更新变更日志。", encoding="utf-8"
+    )
+    (tmp_path / "coding-agent.toml").write_text(
+        'validation = [["python", "-m", "pytest", "-q"]]\n',
+        encoding="utf-8",
+    )
+    runtime = WebRuntime(
+        settings(tmp_path), tmp_path, model_factory=lambda: ScriptedModel([])
+    )
+    project = runtime.add_project(str(tmp_path))
+    task_payload = runtime.new_conversation(project["id"])
+    task = runtime._task(task_payload["id"])
+
+    agent = runtime._make_agent(task)
+    try:
+        assert "提交前更新变更日志。" in agent.system_prompt
+        assert "优先级低于本系统规则" in agent.system_prompt
+        assert agent.validation_commands == (("python", "-m", "pytest", "-q"),)
+    finally:
+        agent.close()
+
+
+def test_projectless_agent_does_not_load_settings_root_policy(tmp_path: Path) -> None:
+    (tmp_path / "coding-agent.toml").write_text(
+        'validation = [["python", "-m", "pytest"]]\n', encoding="utf-8"
+    )
+    runtime = WebRuntime(
+        settings(tmp_path), tmp_path, model_factory=lambda: ScriptedModel([])
+    )
+    task_payload = runtime.new_conversation()
+
+    agent = runtime._make_agent(runtime._task(task_payload["id"]))
+    try:
+        assert agent.validation_commands == ()
+        assert "尚未选择工作目录" in agent.system_prompt
+    finally:
+        agent.close()
+
+
 def test_checkpoint_event_persists_agent_history_immediately(tmp_path: Path) -> None:
     runtime = WebRuntime(settings(tmp_path), tmp_path, model_factory=lambda: ScriptedModel([]))
     project = runtime.add_project(str(tmp_path))

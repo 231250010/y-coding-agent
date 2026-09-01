@@ -181,6 +181,32 @@ def test_final_reasoning_content_is_replayed_into_a_later_user_turn(
     assert previous_assistant["reasoning_content"] == "第一轮内部分析"
 
 
+def test_restore_history_refreshes_current_system_prompt(tmp_path: Path) -> None:
+    agent = CodingAgent(
+        ScriptedModel([]),
+        ToolRegistry(tmp_path),
+        ContextManager(100_000),
+        system_prompt="current system and project rules",
+    )
+
+    agent.restore_history(
+        [
+            {"role": "system", "content": "stale project rules"},
+            {"role": "user", "content": "previous task"},
+            {"role": "assistant", "content": "previous answer"},
+        ]
+    )
+
+    assert agent.history[0] == {
+        "role": "system",
+        "content": "current system and project rules",
+    }
+    assert agent.history[1:] == [
+        {"role": "user", "content": "previous task"},
+        {"role": "assistant", "content": "previous answer"},
+    ]
+
+
 def test_tool_end_exposes_local_changes_without_sending_them_to_model(tmp_path: Path) -> None:
     events: list[tuple[str, dict[str, Any]]] = []
     tracker = ConversationChangeTracker(tmp_path)
@@ -251,6 +277,34 @@ def test_completion_gate_requests_validation_and_accepts_fresh_evidence(
     assert model.requests[2][0][-2]["reasoning_content"] == "先总结当前修改"
     assert agent.execution_state.outcome == "completed"
     assert not agent.execution_state.needs_validation
+
+
+def test_completion_gate_lists_project_validation_commands(tmp_path: Path) -> None:
+    tracker = ConversationChangeTracker(tmp_path)
+    model = ScriptedModel(
+        [
+            AssistantResponse(
+                tool_calls=[call(
+                    "c1", "write_file", {"path": "a.txt", "content": "changed\n"}
+                )]
+            ),
+            AssistantResponse("已经完成"),
+            AssistantResponse("无法执行项目检查，明确标记未验证"),
+        ]
+    )
+    agent = CodingAgent(
+        model,
+        ToolRegistry(tmp_path, approver=lambda *_args: True, change_tracker=tracker),
+        ContextManager(100_000),
+        validation_commands=(("custom-check", "--verify"),),
+    )
+
+    result = agent.run("修改文件")
+
+    gate = str(model.requests[2][0][-1]["content"])
+    assert '["custom-check", "--verify"]' in gate
+    assert "run_process" in gate
+    assert result.startswith("⚠️")
 
 
 def test_multiple_tools_are_executed_in_order(tmp_path: Path) -> None:

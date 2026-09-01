@@ -9,7 +9,8 @@ venv/
 .env
 .env.*
 !.env.example
-.coding-agent/
+.coding-agent/*
+!.coding-agent/rules.md
 build/
 dist/
 .worktrees/

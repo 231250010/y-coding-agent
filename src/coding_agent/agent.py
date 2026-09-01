@@ -42,6 +42,7 @@ class CodingAgent:
         max_parallel_tools: int = 4,
         model_call_lock: threading.RLock | None = None,
         execution_state: ExecutionState | None = None,
+        validation_commands: Sequence[Sequence[str]] = (),
     ) -> None:
         if max_parallel_tools < 1:
             raise ValueError("max_parallel_tools 必须至少为 1")
@@ -56,11 +57,14 @@ class CodingAgent:
         self.max_parallel_tools = max_parallel_tools
         self.model_call_lock = model_call_lock or threading.RLock()
         self.execution_state = execution_state or ExecutionState()
+        self.validation_commands = tuple(tuple(command) for command in validation_commands)
+        self.execution_state.configure_validation_commands(self.validation_commands)
         self.history: list[Message] = [{"role": "system", "content": system_prompt}]
 
     def clear(self) -> None:
         self.task_list.replace("", [])
         self.execution_state = ExecutionState()
+        self.execution_state.configure_validation_commands(self.validation_commands)
         self.history = [{"role": "system", "content": self.system_prompt}]
 
     def close(self) -> None:
@@ -74,7 +78,11 @@ class CodingAgent:
             for message in messages
             if not TaskListState.is_anchor(message)
         ]
-        if not restored or restored[0].get("role") != "system":
+        if restored and restored[0].get("role") == "system":
+            # Runtime policy is reloaded for every user turn. Never let a
+            # persisted system message retain stale project rules or settings.
+            restored[0] = {"role": "system", "content": self.system_prompt}
+        else:
             restored.insert(0, {"role": "system", "content": self.system_prompt})
         self.history = restored
         self._sync_task_list_anchor()
@@ -128,11 +136,7 @@ class CodingAgent:
                     self.history.append(
                         {
                             "role": "system",
-                            "content": (
-                                "完成门禁：当前修改版本尚无修改后的成功验证证据。"
-                                "请运行相关测试、构建或静态检查；如果客观上无法验证，"
-                                "下一次最终回答必须明确说明未验证原因，不能声称测试已经通过。"
-                            ),
+                            "content": self._completion_gate_message(),
                         }
                     )
                     self._checkpoint()
@@ -194,6 +198,25 @@ class CodingAgent:
 
         self.execution_state.mark_failed()
         raise AgentStopped(f"达到最大步骤数 {self.max_steps}，任务未正常结束")
+
+    def _completion_gate_message(self) -> str:
+        message = (
+            "完成门禁：当前修改版本尚无修改后的成功验证证据。"
+            "请运行相关测试、构建或静态检查；如果客观上无法验证，"
+            "下一次最终回答必须明确说明未验证原因，不能声称测试已经通过。"
+        )
+        if not self.validation_commands:
+            return message
+        declared = "\n".join(
+            f"- {json.dumps(list(command), ensure_ascii=False)}"
+            for command in self.validation_commands
+        )
+        return message + (
+            "\n项目在 coding-agent.toml 中声明了以下优先验证命令：\n"
+            f"{declared}\n"
+            "请优先逐项使用 run_process 的 argv 原样执行。命令仍受安全分类和审批约束；"
+            "若某项不适用、失败或被拒绝，请如实说明，不能绕过安全策略。"
+        )
 
     def _sync_task_list_anchor(self) -> None:
         history = [
