@@ -166,6 +166,15 @@ def test_diff_panel_uses_adaptive_grid_without_covering_desktop_conversation() -
     assert ".diff-panel { position: fixed; z-index: 8; inset: 0; width: 100%;" in css
 
 
+def test_conversation_flex_layout_keeps_composer_at_bottom_when_optional_rows_hide() -> None:
+    css = asset("app.css")
+
+    assert ".conversation { position: relative; display: flex; flex-direction: column;" in css
+    assert ".transcript { flex: 1 1 auto; min-height: 0;" in css
+    assert ".composer { z-index: 2; flex: 0 0 auto; align-self: center;" in css
+    assert "grid-template-rows: auto auto auto minmax(0, 1fr) auto" not in css
+
+
 def test_devops_progress_rail_and_cancel_control_are_wired() -> None:
     html = asset("index.html")
     javascript = asset("app.js")
