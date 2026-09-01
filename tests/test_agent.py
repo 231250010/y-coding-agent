@@ -113,7 +113,7 @@ def test_deepseek_reasoning_content_is_replayed_with_assistant_tool_call(
     assert assistant["tool_calls"][0]["id"] == "c1"
 
 
-def test_final_reasoning_content_is_not_replayed_into_a_later_user_turn(
+def test_final_reasoning_content_is_replayed_into_a_later_user_turn(
     tmp_path: Path,
 ) -> None:
     agent, model = make_agent(
@@ -131,7 +131,7 @@ def test_final_reasoning_content_is_not_replayed_into_a_later_user_turn(
         for message in model.requests[1][0]
         if message.get("role") == "assistant"
     )
-    assert "reasoning_content" not in previous_assistant
+    assert previous_assistant["reasoning_content"] == "第一轮内部分析"
 
 
 def test_tool_end_exposes_local_changes_without_sending_them_to_model(tmp_path: Path) -> None:
@@ -178,7 +178,7 @@ def test_completion_gate_requests_validation_and_accepts_fresh_evidence(
                     {"path": "valid.py", "content": "answer = 42\n"},
                 )]
             ),
-            AssistantResponse("已经完成"),
+            AssistantResponse("已经完成", reasoning_content="先总结当前修改"),
             AssistantResponse(
                 tool_calls=[call(
                     "c2",
@@ -201,6 +201,7 @@ def test_completion_gate_requests_validation_and_accepts_fresh_evidence(
     assert agent.run("创建 Python 文件并验证") == "已写入并通过语法检查"
     assert model.requests[2][0][-1]["role"] == "system"
     assert "完成门禁" in str(model.requests[2][0][-1]["content"])
+    assert model.requests[2][0][-2]["reasoning_content"] == "先总结当前修改"
     assert agent.execution_state.outcome == "completed"
     assert not agent.execution_state.needs_validation
 

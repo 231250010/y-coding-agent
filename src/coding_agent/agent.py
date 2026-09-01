@@ -208,9 +208,10 @@ class CodingAgent:
 
     def _append_assistant(self, response: AssistantResponse) -> None:
         message: Message = {"role": "assistant", "content": response.content}
-        if response.tool_calls and response.reasoning_content is not None:
-            # DeepSeek thinking models require the original reasoning payload
-            # alongside assistant tool_calls in the next request.
+        if response.reasoning_content is not None:
+            # DeepSeek thinking requires every assistant reasoning payload to be
+            # replayed unchanged whenever that message remains in history. This
+            # also covers internal continuation such as the completion gate.
             message["reasoning_content"] = response.reasoning_content
         if response.tool_calls:
             message["tool_calls"] = [call.as_message_dict() for call in response.tool_calls]
