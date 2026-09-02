@@ -865,13 +865,20 @@ class WebRuntime:
                         if isinstance(raw_tools, list)
                         else ()
                     )
-                    step = data.get("step")
+                    decision_number = 1 + sum(
+                        entry.kind == "decision_summary" for entry in task.entries
+                    )
                     task.streaming_content = ""
                     task.entries.append(
                         ChatEntry(
                             "decision_summary",
                             self._visible_decision_summary(content),
-                            step=step if isinstance(step, int) and step > 0 else None,
+                            # A decision summary number belongs to the visible
+                            # conversation timeline.  The model-loop step can
+                            # jump after tool retries, context compaction, or a
+                            # completion-gate continuation, so it must not be
+                            # used as the user-facing sequence number.
+                            step=decision_number,
                             tools=safe_tools,
                         )
                     )
@@ -1248,9 +1255,13 @@ class WebRuntime:
         if not isinstance(value, list):
             return []
         entries: list[ChatEntry] = []
+        decision_number = 0
         for raw in value:
             if not isinstance(raw, dict):
                 continue
+            kind = str(raw.get("kind", "system"))
+            if kind == "decision_summary":
+                decision_number += 1
             paths = raw.get("change_paths")
             stored_changes: list[dict[str, Any]] = []
             raw_changes = raw.get("file_changes")
@@ -1261,16 +1272,14 @@ class WebRuntime:
                         stored_changes.append(file_change_to_dict(parsed))
             entries.append(
                 ChatEntry(
-                    str(raw.get("kind", "system")),
+                    kind,
                     str(raw.get("text", "")),
                     tuple(path for path in paths if isinstance(path, str)) if isinstance(paths, list) else (),
                     id=str(raw.get("id") or uuid.uuid4().hex),
                     file_changes=stored_changes,
-                    step=(
-                        raw.get("step")
-                        if isinstance(raw.get("step"), int) and raw.get("step") > 0
-                        else None
-                    ),
+                    # Normalize legacy sessions whose stored value was the
+                    # internal model-loop step rather than the visible order.
+                    step=decision_number if kind == "decision_summary" else None,
                     tools=(
                         tuple(
                             tool

@@ -71,6 +71,13 @@ def test_assets_contain_no_remote_urls_or_secret_values() -> None:
     assert re.search(r"\bsk-[A-Za-z0-9_-]{12,}", combined) is None
 
 
+def test_workspace_picker_explains_local_and_model_data_boundaries() -> None:
+    html = asset("index.html")
+
+    assert "只会把目录路径交给本机 Agent" in html
+    assert "可能会发送给你配置的模型 API" in html
+
+
 def test_frontend_exposes_delete_for_projects_and_conversations() -> None:
     html = asset("index.html")
     js = asset("app.js")
@@ -128,11 +135,32 @@ def test_frontend_renders_accessible_collapsible_decision_summaries() -> None:
     assert 'element("summary", "decision-head")' in javascript
     assert 'card.addEventListener("toggle", syncDecisionState)' in javascript
     assert 'querySelectorAll(".decision-card[open]")' in javascript
+    assert "decisionNumberAt(entries, index)" in javascript
+    assert "options.decisionNumber || entry.step" in javascript
     for selector in [
         ".message.decision_summary",
         ".decision-card",
         ".decision-head",
         ".decision-body",
+    ]:
+        assert selector in css
+
+
+def test_frontend_groups_successful_tool_results_into_compact_execution_rows() -> None:
+    javascript = asset("app.js")
+    css = asset("app.css")
+
+    assert "function toolGroupNode(entries)" in javascript
+    assert 'while (end < entries.length && entries[end].kind === "tool")' in javascript
+    assert 'element("article", "execution-group")' in javascript
+    assert 'element("details", "execution-item")' in javascript
+    assert "appendTranscriptEntries(task.entries, renderedEntryKeys.length" in javascript
+    for selector in [
+        ".execution-group",
+        ".execution-head",
+        ".execution-row",
+        ".execution-preview",
+        ".execution-detail",
     ]:
         assert selector in css
 

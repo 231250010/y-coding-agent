@@ -264,7 +264,9 @@ def test_decision_summary_replaces_streaming_text_redacts_and_restores(
     decision = snapshot["entries"][-1]
     assert snapshot["streaming_content"] == ""
     assert decision["kind"] == "decision_summary"
-    assert decision["step"] == 2
+    # The visible number follows decision-summary order, not the model loop's
+    # raw step (2 in the event above).
+    assert decision["step"] == 1
     assert decision["tools"] == ["read_file"]
     assert len(decision["text"]) <= 500
     assert "test-key" not in decision["text"]
@@ -276,8 +278,21 @@ def test_decision_summary_replaces_streaming_text_redacts_and_restores(
     )
     restored_decision = restored.snapshot()["tasks"][0]["entries"][-1]
     assert restored_decision["kind"] == "decision_summary"
-    assert restored_decision["step"] == 2
+    assert restored_decision["step"] == 1
     assert restored_decision["tools"] == ["read_file"]
+
+
+def test_legacy_decision_steps_are_normalized_to_visible_timeline_order() -> None:
+    entries = WebRuntime._entries_from_storage(
+        [
+            {"kind": "user", "text": "开始"},
+            {"kind": "decision_summary", "text": "先检查", "step": 4},
+            {"kind": "tool", "text": "list_files\n完成"},
+            {"kind": "decision_summary", "text": "再修改", "step": 11},
+        ]
+    )
+
+    assert [entry.step for entry in entries if entry.kind == "decision_summary"] == [1, 2]
 
 
 def test_agent_run_orders_decision_summary_before_tool_result_and_final_answer(

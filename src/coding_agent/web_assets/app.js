@@ -261,8 +261,9 @@ function messageNode(entry, options = {}) {
     const head = element("summary", "decision-head");
     const marker = element("span", "decision-marker");
     const heading = element("span", "decision-heading");
+    const decisionNumber = options.decisionNumber || entry.step;
     heading.append(
-      element("strong", "", `决策摘要${entry.step ? ` ${entry.step}` : ""}`),
+      element("strong", "", `决策摘要${decisionNumber ? ` ${decisionNumber}` : ""}`),
       element("small", "", (entry.tools || []).join(" · ") || "准备下一步行动"),
     );
     const toggle = element("span", "decision-toggle");
@@ -299,6 +300,137 @@ function messageNode(entry, options = {}) {
   return article;
 }
 
+const localToolLabels = {
+  list_files: "浏览文件",
+  read_file: "读取文件",
+  search_text: "搜索代码",
+  write_file: "写入文件",
+  batch_write_files: "批量写入",
+  replace_text: "修改文件",
+  batch_replace_text: "批量修改",
+  run_command: "执行命令",
+  run_process: "运行进程",
+  load_skill: "加载 Skill",
+  read_skill_resource: "读取 Skill 资源",
+  run_skill_script: "运行 Skill 脚本",
+  mcp_status: "检查 MCP",
+  mcp_list_resources: "列出 MCP 资源",
+  mcp_read_resource: "读取 MCP 资源",
+  mcp_list_prompts: "列出 MCP 提示词",
+  mcp_get_prompt: "读取 MCP 提示词",
+  git_status: "检查 Git 状态",
+  git_diff: "查看代码差异",
+  git_log: "查看提交记录",
+  git_branches: "查看分支",
+  git_create_branch: "创建分支",
+  git_stage: "暂存文件",
+  git_unstage: "取消暂存",
+  git_commit: "提交代码",
+  git_pull: "拉取代码",
+  git_push: "推送代码",
+};
+
+function toolEntryParts(entry) {
+  const lines = String(entry.text || "").split(/\r?\n/);
+  const name = (lines.shift() || "工具").trim();
+  const detail = lines.join("\n").trim();
+  const compact = detail.replace(/\s+/g, " ").trim();
+  return {
+    name,
+    label: localToolLabels[name]
+      || (name.startsWith("git_") ? "Git 操作" : name.startsWith("mcp_") ? "MCP 调用" : name),
+    detail,
+    preview: compact ? `${compact.slice(0, 108)}${compact.length > 108 ? "…" : ""}` : "已完成",
+  };
+}
+
+function toolGroupNode(entries) {
+  const article = element("article", "execution-group");
+  article.dataset.toolStart = entries[0] && entries[0].id || "";
+  const parsed = entries.map(toolEntryParts);
+  const counts = new Map();
+  for (const item of parsed) counts.set(item.label, (counts.get(item.label) || 0) + 1);
+  const digest = [...counts.entries()].map(([label, count]) => `${label}${count > 1 ? ` ×${count}` : ""}`).join(" · ");
+  const head = element("div", "execution-head");
+  head.append(
+    element("span", "execution-marker", "✓"),
+    element("strong", "", "本地执行"),
+    element("small", "", `${entries.length} 项 · ${digest}`),
+  );
+  const list = element("div", "execution-list");
+  for (const item of parsed) {
+    const row = element("details", "execution-item");
+    const summary = element("summary", "execution-row");
+    const name = element("span", "execution-name", item.label);
+    name.title = item.name;
+    summary.append(
+      name,
+      element("span", "execution-preview", item.preview),
+      element("span", "execution-more", item.detail ? "详情" : ""),
+    );
+    row.append(summary);
+    if (item.detail) row.append(element("pre", "execution-detail", item.detail));
+    list.append(row);
+  }
+  article.append(head, list);
+  return article;
+}
+
+function transcriptNodes(entries, latestDecisionId) {
+  const nodes = [];
+  let decisionNumber = 0;
+  for (let index = 0; index < entries.length;) {
+    const entry = entries[index];
+    if (entry.kind === "tool") {
+      let end = index + 1;
+      while (end < entries.length && entries[end].kind === "tool") end += 1;
+      nodes.push(toolGroupNode(entries.slice(index, end)));
+      index = end;
+      continue;
+    }
+    if (entry.kind === "decision_summary") decisionNumber += 1;
+    nodes.push(messageNode(entry, {
+      expanded: entry.id === latestDecisionId,
+      decisionNumber: entry.kind === "decision_summary" ? decisionNumber : undefined,
+    }));
+    index += 1;
+  }
+  return nodes;
+}
+
+function decisionNumberAt(entries, targetIndex) {
+  let number = 0;
+  for (let index = 0; index <= targetIndex; index += 1) {
+    if (entries[index].kind === "decision_summary") number += 1;
+  }
+  return number;
+}
+
+function appendTranscriptEntries(entries, startIndex, latestDecisionId) {
+  for (let index = startIndex; index < entries.length;) {
+    const entry = entries[index];
+    if (entry.kind === "tool") {
+      let groupStart = index;
+      while (groupStart > 0 && entries[groupStart - 1].kind === "tool") groupStart -= 1;
+      let groupEnd = index + 1;
+      while (groupEnd < entries.length && entries[groupEnd].kind === "tool") groupEnd += 1;
+      const replacement = toolGroupNode(entries.slice(groupStart, groupEnd));
+      const startId = entries[groupStart].id || "";
+      const existing = [...ui.transcript.querySelectorAll(".execution-group")]
+        .find((node) => node.dataset.toolStart === startId);
+      if (existing) existing.replaceWith(replacement);
+      else ui.transcript.append(replacement);
+      index = groupEnd;
+      continue;
+    }
+    ui.transcript.append(messageNode(entry, {
+      expanded: entry.id === latestDecisionId,
+      decisionNumber: entry.kind === "decision_summary" ? decisionNumberAt(entries, index) : undefined,
+    }));
+    index += 1;
+  }
+}
+
 function transcriptEntryKey(entry, index) {
   return entry.id || `${index}:${entry.kind}:${entry.text}`;
 }
@@ -331,9 +463,7 @@ function renderTranscript(task, streaming) {
     && renderedEntryKeys.every((key, index) => key === nextKeys[index]);
 
   if (!canAppend) {
-    ui.transcript.replaceChildren(...task.entries.map((entry) => messageNode(entry, {
-      expanded: entry.id === latestDecisionId,
-    })));
+    ui.transcript.replaceChildren(...transcriptNodes(task.entries, latestDecisionId));
     streamingMessage = null;
     lastStreamingText = "";
   } else if (nextKeys.length > renderedEntryKeys.length) {
@@ -344,9 +474,7 @@ function renderTranscript(task, streaming) {
     if (streamingMessage) streamingMessage.remove();
     streamingMessage = null;
     lastStreamingText = "";
-    for (const entry of additions) {
-      ui.transcript.append(messageNode(entry, { expanded: entry.id === latestDecisionId }));
-    }
+    appendTranscriptEntries(task.entries, renderedEntryKeys.length, latestDecisionId);
   }
 
   transcriptTaskId = task.id;

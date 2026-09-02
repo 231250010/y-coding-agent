@@ -120,7 +120,7 @@
   <dialog id="workspace-dialog">
     <form id="workspace-form" class="dialog-card">
       <header><div><small id="workspace-dialog-kicker">本机目录</small><h2 id="workspace-dialog-title">添加项目</h2></div><button class="icon-button dialog-close" type="button" aria-label="关闭">×</button></header>
-      <p>从这台电脑选择一个已有目录，或在下方输入绝对路径。目录内容不会上传到本服务。</p>
+      <p>从这台电脑选择一个已有目录，或在下方输入绝对路径。这里只会把目录路径交给本机 Agent，不会将目录作为网页附件上传；Agent 读取的必要内容可能会发送给你配置的模型 API。</p>
       <label for="workspace-path">工作目录</label>
       <div class="workspace-picker-row">
         <input id="workspace-path" name="path" autocomplete="off" placeholder="C:\Users\name\project" required>

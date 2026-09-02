@@ -7,6 +7,7 @@ from subprocess import CompletedProcess
 
 import pytest
 
+import coding_agent.directory_picker as directory_picker
 from coding_agent.directory_picker import DirectoryPickerError, pick_directory
 
 
@@ -42,3 +43,70 @@ def test_picker_rejects_malformed_child_response() -> None:
 
     with pytest.raises(DirectoryPickerError, match="目录选择器返回了无效结果"):
         pick_directory(None, runner=runner)
+
+
+def test_windows_child_prefers_native_dialog_without_loading_tk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    selected = tmp_path / "project"
+    selected.mkdir()
+    native_calls: list[str | None] = []
+
+    def native_picker(initial: str | None) -> str | None:
+        native_calls.append(initial)
+        return str(selected)
+
+    monkeypatch.setattr(directory_picker.sys, "platform", "win32")
+    monkeypatch.setattr(directory_picker, "_choose_directory_windows", native_picker)
+    monkeypatch.setattr(
+        directory_picker,
+        "_choose_directory_tk",
+        lambda _initial: pytest.fail("native picker should not load Tk"),
+    )
+
+    result = directory_picker._choose_directory(str(tmp_path))
+
+    assert result == str(selected.resolve())
+    assert native_calls == [str(tmp_path)]
+
+
+def test_windows_child_returns_none_when_native_dialog_is_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(directory_picker.sys, "platform", "win32")
+    monkeypatch.setattr(
+        directory_picker, "_choose_directory_windows", lambda _initial: None
+    )
+    monkeypatch.setattr(
+        directory_picker,
+        "_choose_directory_tk",
+        lambda _initial: pytest.fail("cancel should not open a second dialog"),
+    )
+
+    result = directory_picker._choose_directory(None)
+
+    assert result is None
+
+
+def test_windows_child_falls_back_to_tk_when_native_dialog_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    selected = tmp_path / "fallback"
+    selected.mkdir()
+    tk_calls: list[str | None] = []
+
+    def native_picker(_initial: str | None) -> str | None:
+        raise DirectoryPickerError("native unavailable")
+
+    def tk_picker(initial: str | None) -> str | None:
+        tk_calls.append(initial)
+        return str(selected)
+
+    monkeypatch.setattr(directory_picker.sys, "platform", "win32")
+    monkeypatch.setattr(directory_picker, "_choose_directory_windows", native_picker)
+    monkeypatch.setattr(directory_picker, "_choose_directory_tk", tk_picker)
+
+    result = directory_picker._choose_directory(str(tmp_path))
+
+    assert result == str(selected)
+    assert tk_calls == [str(tmp_path)]
